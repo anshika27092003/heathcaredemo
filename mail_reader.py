@@ -242,7 +242,7 @@ def load_message_with_attachments(
 
     If ``allowed_sender_emails`` is set, refuse to load when the sender is not in the set.
 
-    Returns dict with keys: from_addr, subject, date, body_preview, attachments.
+    Returns dict with keys: from_addr, subject, date, message_id, body_preview, attachments.
     Each attachment: {filename, content_type, data (bytes)}.
     """
     client, err = _imap_connect()
@@ -281,11 +281,14 @@ def load_message_with_attachments(
         body_preview = _extract_body_preview(msg)
         attachments = _extract_attachments(msg)
 
+        message_id = _decode_mime_header(msg.get("Message-ID"))
+
         client.logout()
         return True, "", {
             "from_addr": from_addr,
             "subject": subject,
             "date": date_,
+            "message_id": message_id,
             "body_preview": body_preview,
             "attachments": attachments,
         }

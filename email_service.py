@@ -11,6 +11,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from credential_documents import REQUIRED_CREDENTIAL_DOCUMENTS
+
 # Load .env once when this module is imported (Streamlit reloads modules often).
 load_dotenv()
 
@@ -126,3 +128,98 @@ def send_credentialing_email(to_address: str) -> tuple[bool, str]:
         return False, f"Network error while contacting the mail server: {exc}"
 
     return True, f"Email sent successfully to {to_address}."
+
+
+def send_missing_credentialing_documents_email(
+    to_address: str,
+    missing_labels: list[str],
+    original_subject: Optional[str] = None,
+    in_reply_to_message_id: Optional[str] = None,
+) -> tuple[bool, str]:
+    """
+    Notify a provider that required attachment types were not found (by filename).
+
+    Uses the same SMTP settings as ``send_credentialing_email``. Optionally sets
+    ``In-Reply-To`` / ``References`` when ``in_reply_to_message_id`` is provided.
+    """
+    to_address = to_address.strip()
+    if not to_address:
+        return False, "Recipient address is missing."
+    if not missing_labels:
+        return True, "Nothing to send (all required documents were matched)."
+
+    settings = _get_smtp_settings()
+    missing_cfg = [
+        name
+        for name, key in [
+            ("SMTP_USER", settings["user"]),
+            ("SMTP_PASSWORD", settings["password"]),
+            ("SMTP_FROM or SMTP_USER", settings["from_addr"]),
+        ]
+        if not key
+    ]
+    if missing_cfg:
+        return False, (
+            "Email is not configured. Set the following in your .env file: "
+            + ", ".join(missing_cfg)
+        )
+
+    numbered_required = "\n".join(
+        f"  {i}. {label}" for i, label in enumerate(REQUIRED_CREDENTIAL_DOCUMENTS, start=1)
+    )
+    missing_bullets = "\n".join(f"  - {m}" for m in missing_labels)
+
+    body = f"""Dear Provider,
+
+We received your message, but the following required credentialing documents were not identified from the attachment filenames:
+
+{missing_bullets}
+
+Please reply with **all** required documents attached in **one** email. Use clear file names when possible (for example: resume.pdf, medical_license.pdf, dea_certificate.pdf).
+
+Required documents (all five):
+{numbered_required}
+
+Regards,
+Admin Team"""
+
+    subject = "Missing credentialing documents — please send all items together"
+    if original_subject and original_subject.strip():
+        subject = f"Re: {original_subject.strip()[:180]}"
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings["from_addr"]
+    message["To"] = to_address
+    message.set_content(body)
+
+    mid = (in_reply_to_message_id or "").strip()
+    if mid:
+        if not mid.startswith("<"):
+            mid = f"<{mid}>" if "@" in mid else mid
+        message["In-Reply-To"] = mid
+        message["References"] = mid
+
+    context = ssl.create_default_context()
+
+    try:
+        with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+            server.login(settings["user"], settings["password"])
+            server.send_message(message)
+    except smtplib.SMTPAuthenticationError as exc:
+        raw = getattr(exc, "smtp_error", b"") or b""
+        if isinstance(raw, bytes):
+            detail = raw.decode(errors="replace").strip()
+        else:
+            detail = str(raw).strip()
+        suffix = f' Provider message: "{detail}"' if detail else ""
+        return False, "SMTP authentication failed while sending missing-documents notice." + suffix
+    except smtplib.SMTPException as exc:
+        return False, f"SMTP error: {exc}"
+    except OSError as exc:
+        return False, f"Network error while contacting the mail server: {exc}"
+
+    return True, f"Missing-documents notice sent to {to_address}."
