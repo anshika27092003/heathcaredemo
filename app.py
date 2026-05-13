@@ -5,6 +5,7 @@ Streamlit admin UI: manage provider emails and trigger credentialing notificatio
 import inspect
 import json
 import os
+import sqlite3
 import tempfile
 from datetime import datetime, timezone
 
@@ -172,17 +173,18 @@ def _insert_provider_document_safe(**kwargs: object) -> tuple[bool, str]:
 def _safe_update_document_classification(
     doc_id: int, document_category: str, structured_fields: str
 ) -> tuple[bool, str]:
-    """Persist manual edits or re-run output; no-op message if the DB module is outdated."""
+    """Persist manual edits or re-run output."""
+    _ensure_update_document_classification_polyfill()
     upd = getattr(db, "update_document_classification", None)
     if not callable(upd):
         return (
             False,
-            "This deployment’s **database.py** is missing `update_document_classification`. "
-            "Sync **database.py** from the repo.",
+            "Could not attach `update_document_classification` (needs `database._get_connection`). "
+            "Replace **database.py** with the version from this repo.",
         )
     try:
         upd(int(doc_id), document_category, structured_fields or "{}")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, sqlite3.OperationalError) as exc:
         return False, str(exc)
     return True, "Saved to database."
 
@@ -199,10 +201,61 @@ def _format_added_at(iso_ts: str) -> str:
         return iso_ts
 
 
+def _ensure_update_document_classification_polyfill() -> None:
+    """
+    Some Streamlit deployments ship an older ``database.py`` without
+    ``update_document_classification``. Attach a compatible implementation so
+    **Re-run categorization** and **Save changes** on extracted fields still work.
+    """
+    if callable(getattr(db, "update_document_classification", None)):
+        return
+
+    def _migrate_cols_standalone(conn: sqlite3.Connection) -> None:
+        cur = conn.execute("PRAGMA table_info(provider_documents)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "document_category" not in columns:
+            conn.execute(
+                "ALTER TABLE provider_documents ADD COLUMN document_category TEXT NOT NULL DEFAULT 'other'"
+            )
+        if "structured_fields" not in columns:
+            conn.execute(
+                "ALTER TABLE provider_documents ADD COLUMN structured_fields TEXT NOT NULL DEFAULT '{}'"
+            )
+
+    def update_document_classification(
+        doc_id: int, document_category: str, structured_fields: str
+    ) -> None:
+        get_conn = getattr(db, "_get_connection", None)
+        if get_conn is None:
+            raise RuntimeError("database._get_connection is missing")
+        migrate_fn = getattr(db, "_migrate_provider_documents_columns", None)
+        with get_conn() as conn:
+            if callable(migrate_fn):
+                migrate_fn(conn)
+            else:
+                _migrate_cols_standalone(conn)
+            conn.execute(
+                """
+                UPDATE provider_documents
+                SET document_category = ?, structured_fields = ?
+                WHERE id = ?
+                """,
+                (
+                    (document_category or "other").strip() or "other",
+                    structured_fields or "{}",
+                    int(doc_id),
+                ),
+            )
+            conn.commit()
+
+    setattr(db, "update_document_classification", update_document_classification)
+
+
 # Run SQLite DDL + migrations on every load so schema upgrades apply after deploy
 # (``@st.cache_resource`` previously skipped ``init_db`` on reruns and could leave Cloud DB
 # missing new columns → insert failures / TypeErrors).
 db.init_db()
+_ensure_update_document_classification_polyfill()
 
 # --- Lightweight styling (Streamlit-native, no custom CSS file) ---
 st.markdown(
