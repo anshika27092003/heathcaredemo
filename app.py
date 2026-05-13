@@ -539,6 +539,54 @@ with tab_records:
             key="doc_provider_pick",
         )
         docs = db.list_documents_for_provider(doc_pid)
+
+        with st.expander("Clear processed data & inbox session", expanded=False):
+            st.caption(
+                "Deletes rows in SQLite **`provider_documents`** (OCR text and extracted fields). "
+                "**Onboarded providers** are not removed. Inbox buttons only clear this browser session."
+            )
+            confirm_del_one = st.checkbox(
+                f"I understand this removes every stored document for the selected provider (ID {doc_pid}).",
+                key="confirm_delete_docs_one",
+            )
+            if st.button(
+                "Delete all processed documents for this provider",
+                type="primary",
+                disabled=not confirm_del_one,
+            ):
+                n, msg = db.delete_all_documents_for_provider(doc_pid)
+                st.session_state["flash_success"] = msg
+                st.session_state.pop("open_uid", None)
+                st.rerun()
+
+            st.divider()
+            st.markdown("**All providers** — destructive")
+            confirm_del_all = st.checkbox(
+                "I understand this deletes every processed document for **every** onboarded provider.",
+                key="confirm_delete_docs_all",
+            )
+            wipe_phrase = st.text_input(
+                "Type exactly: DELETE ALL DOCUMENTS",
+                key="wipe_docs_phrase",
+                help="Extra guard so this is not clicked by accident.",
+            )
+            if st.button(
+                "Delete all processed documents (entire database)",
+                type="secondary",
+                disabled=not confirm_del_all or wipe_phrase.strip() != "DELETE ALL DOCUMENTS",
+            ):
+                n, msg = db.delete_all_documents_all_providers()
+                st.session_state["flash_success"] = msg
+                st.session_state.pop("open_uid", None)
+                st.rerun()
+
+            st.divider()
+            if st.button("Clear inbox session state", type="secondary"):
+                st.session_state.pop("inbox_rows", None)
+                st.session_state.pop("open_uid", None)
+                st.success("Cleared loaded inbox list and open message for this session.")
+                st.rerun()
+
         if not docs:
             st.info("No processed documents for this provider yet.")
         else:

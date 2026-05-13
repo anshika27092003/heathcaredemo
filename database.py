@@ -315,3 +315,25 @@ def list_documents_for_provider(provider_id: int) -> list[dict[str, Any]]:
         )
         rows = cur.fetchall()
     return [dict(r) for r in rows]
+
+
+def delete_all_documents_for_provider(provider_id: int) -> tuple[int, str]:
+    """Remove every ``provider_documents`` row for one provider. Returns (count deleted, message)."""
+    try:
+        pid = int(provider_id)
+    except (TypeError, ValueError):
+        return 0, "Invalid provider id."
+    with _get_connection() as conn:
+        cur = conn.execute("DELETE FROM provider_documents WHERE provider_id = ?", (pid,))
+        conn.commit()
+        n = cur.rowcount or 0
+    return n, f"Deleted {n} processed document row(s) for this provider."
+
+
+def delete_all_documents_all_providers() -> tuple[int, str]:
+    """Remove every row in ``provider_documents`` (all providers)."""
+    with _get_connection() as conn:
+        cur = conn.execute("DELETE FROM provider_documents")
+        conn.commit()
+        n = cur.rowcount or 0
+    return n, f"Deleted {n} processed document row(s) across all providers."
