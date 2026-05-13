@@ -93,7 +93,13 @@ def _apply_streamlit_secrets_to_environ() -> None:
 _apply_streamlit_secrets_to_environ()
 
 import database as db
-from email_service import send_credentialing_email, send_missing_details_email
+from email_service import send_credentialing_email
+
+try:
+    from email_service import send_missing_details_email
+except ImportError:
+    # Streamlit Cloud / forks sometimes deploy app.py without the matching email_service.py.
+    send_missing_details_email = None  # type: ignore[misc, assignment]
 
 # mail_reader / ocr_service are imported lazily where used so the first paint does not
 # load IMAP + Google Document AI stacks until you open inbox / run OCR.
@@ -810,41 +816,48 @@ with tab_records:
                         st.error(msg_u)
 
             with st.expander("Missing fields — email provider", expanded=False):
-                prov_row = id_to_row[doc_pid]
-                prov_email = str(prov_row.get("email") or "").strip()
-                prov_name = (prov_row.get("name") or "").strip() or "Provider"
-                st.caption(
-                    "Uses the **same required-field rules** as the tables below. "
-                    "The message is sent to this provider’s **onboarded email** (from Provider onboarding), "
-                    "not the address read from a résumé."
-                )
-                gap_list: list[tuple[str, list[str]]] = []
-                for d in docs:
-                    dc, sf = _display_category_and_fields(d)
-                    labels = missing_credentialing_labels(dc, sf)
-                    if labels:
-                        gap_list.append((str(d.get("filename") or "document"), labels))
-                if not gap_list:
-                    st.success("No required-field gaps detected for this provider’s documents.")
+                if send_missing_details_email is None:
+                    st.warning(
+                        "This deployment’s **email_service.py** is missing `send_missing_details_email`. "
+                        "Deploy the latest **email_service.py** from the same branch as **app.py** (or pull "
+                        "from the repo that includes the missing-details mail helper), then redeploy."
+                    )
                 else:
-                    for fn, labels in gap_list:
-                        st.markdown(f"**{fn}**")
-                        for lab in labels:
-                            st.markdown(f"- {lab}")
-                    if st.button(
-                        "Send missing-details email to provider",
-                        type="primary",
-                        key="btn_send_missing_email",
-                    ):
-                        ok_m, msg_m = send_missing_details_email(
-                            prov_email,
-                            prov_name,
-                            gap_list,
-                        )
-                        if ok_m:
-                            st.success(msg_m)
-                        else:
-                            st.error(msg_m)
+                    prov_row = id_to_row[doc_pid]
+                    prov_email = str(prov_row.get("email") or "").strip()
+                    prov_name = (prov_row.get("name") or "").strip() or "Provider"
+                    st.caption(
+                        "Uses the **same required-field rules** as the tables below. "
+                        "The message is sent to this provider’s **onboarded email** (from Provider onboarding), "
+                        "not the address read from a résumé."
+                    )
+                    gap_list: list[tuple[str, list[str]]] = []
+                    for d in docs:
+                        dc, sf = _display_category_and_fields(d)
+                        labels = missing_credentialing_labels(dc, sf)
+                        if labels:
+                            gap_list.append((str(d.get("filename") or "document"), labels))
+                    if not gap_list:
+                        st.success("No required-field gaps detected for this provider’s documents.")
+                    else:
+                        for fn, labels in gap_list:
+                            st.markdown(f"**{fn}**")
+                            for lab in labels:
+                                st.markdown(f"- {lab}")
+                        if st.button(
+                            "Send missing-details email to provider",
+                            type="primary",
+                            key="btn_send_missing_email",
+                        ):
+                            ok_m, msg_m = send_missing_details_email(
+                                prov_email,
+                                prov_name,
+                                gap_list,
+                            )
+                            if ok_m:
+                                st.success(msg_m)
+                            else:
+                                st.error(msg_m)
             buckets: dict[str, list] = {"license": [], "cv": [], "other": []}
             for d in docs:
                 dc, _sf = _display_category_and_fields(d)
