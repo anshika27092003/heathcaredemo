@@ -7,6 +7,8 @@ names such as ``resume.pdf``, ``medical_license.pdf``, ``dea_certificate.pdf``.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 # Display order matches product requirements.
 REQUIRED_CREDENTIAL_DOCUMENTS: tuple[str, ...] = (
     "CV/Resume",
@@ -18,12 +20,63 @@ REQUIRED_CREDENTIAL_DOCUMENTS: tuple[str, ...] = (
 
 # First matching row wins for each filename (more specific rows first).
 _FILENAME_DOC_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("DEA Certificate", ("dea", "drug enforcement")),
-    ("Medical License", ("medical license", "physician license", "state license", "license")),
+    ("DEA Certificate", ("dea.", "dea_", " dea", "deacert", "dea cert", "dea registration", "drug enforcement")),
+    (
+        "Medical License",
+        (
+            "medical license",
+            "physician license",
+            "state license",
+            "license",
+            "licence",
+            " lic",
+            " lic.",
+            "state lic",
+            "phys lic",
+        ),
+    ),
     ("Board Certifications", ("board cert", "board certification", "abms", "board eligible")),
     ("Insurance Documents", ("insurance", "malpractice", "liability", "coi", "policy")),
-    ("CV/Resume", ("resume", "curriculum vitae", "curriculum", "c.v", "cv", "vita")),
+    (
+        "CV/Resume",
+        (
+            "resume",
+            "curriculum vitae",
+            "curriculum",
+            "c.v",
+            " cv",
+            " cv.",
+            "vita",
+            "cv",
+        ),
+    ),
 )
+
+
+class AttachmentMatchReport(NamedTuple):
+    """Per-attachment filename classification for UI and reminder emails."""
+
+    matched_by_category: dict[str, tuple[str, ...]]
+    missing_categories: tuple[str, ...]
+    unmatched_filenames: tuple[str, ...]
+
+
+def build_attachment_match_report(filenames: list[str]) -> AttachmentMatchReport:
+    """Map each non-empty filename to a required category or to *unmatched*."""
+    buckets: dict[str, list[str]] = {label: [] for label in REQUIRED_CREDENTIAL_DOCUMENTS}
+    unmatched: list[str] = []
+    for raw in filenames:
+        fn = (raw or "").strip()
+        if not fn:
+            continue
+        label = classify_attachment_filename(fn)
+        if label:
+            buckets[label].append(fn)
+        else:
+            unmatched.append(fn)
+    matched = {k: tuple(v) for k, v in buckets.items() if v}
+    missing = tuple(label for label in REQUIRED_CREDENTIAL_DOCUMENTS if not buckets[label])
+    return AttachmentMatchReport(matched, missing, tuple(unmatched))
 
 
 def _normalize_filename_for_match(filename: str) -> str:

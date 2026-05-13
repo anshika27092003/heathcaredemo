@@ -92,15 +92,41 @@ def _apply_streamlit_secrets_to_environ() -> None:
 _apply_streamlit_secrets_to_environ()
 
 import database as db
-from credential_documents import (
-    REQUIRED_CREDENTIAL_DOCUMENTS,
-    detected_document_categories,
-    missing_required_documents,
-)
+from credential_documents import REQUIRED_CREDENTIAL_DOCUMENTS, build_attachment_match_report
 from email_service import send_credentialing_email, send_missing_credentialing_documents_email
 
 # mail_reader / ocr_service are imported lazily where used so the first paint does not
 # load IMAP + Google Document AI stacks until you open inbox / run OCR.
+
+
+def _render_required_document_checklist(filenames: list[str]) -> None:
+    """Show which of the five required types were recognized from attachment names vs pending."""
+    rep = build_attachment_match_report(filenames)
+    st.markdown("##### Required-document checklist (by file name)")
+    col_rec, col_pend = st.columns(2)
+    with col_rec:
+        st.markdown("**Recognized**")
+        any_got = False
+        for lab in REQUIRED_CREDENTIAL_DOCUMENTS:
+            files = rep.matched_by_category.get(lab, ())
+            if files:
+                any_got = True
+                st.write(f"**{lab}** — {', '.join(files)}")
+        if not any_got:
+            st.caption("None of the five types matched these names yet.")
+    with col_pend:
+        st.markdown("**Still pending**")
+        if rep.missing_categories:
+            for lab in rep.missing_categories:
+                st.write(f"**{lab}**")
+        else:
+            st.success("All five required types are matched.")
+    if rep.unmatched_filenames:
+        st.info(
+            "**Not matched to a required type:** "
+            + ", ".join(rep.unmatched_filenames)
+            + " — if any of these are a required document, rename (e.g. `dea_certificate.pdf`)."
+        )
 
 
 def _format_added_at(iso_ts: str) -> str:
@@ -387,9 +413,13 @@ with tab_mail:
                     st.markdown("**Attachments**")
                     for att in atts:
                         st.write(f"- {att.get('filename', '(unnamed)')}")
+                    _render_required_document_checklist(
+                        [str(att.get("filename") or "") for att in atts]
+                    )
                     st.info(
                         "Open the **Process documents** tab to run **Google Document AI** on these files "
-                        "and save text to **provider_documents**."
+                        "and save text to **provider_documents**. If anything is still **pending**, "
+                        "processing will email the provider automatically (once per message)."
                     )
                 else:
                     st.caption("No file attachments on this message.")
@@ -440,20 +470,8 @@ with tab_proc:
                 st.caption("No file attachments on this message.")
             else:
                 fnames = [str(att.get("filename") or "") for att in atts]
-                found = detected_document_categories(fnames)
-                missing = missing_required_documents(fnames)
                 with st.container():
-                    st.markdown("**Required documents** (matched from **filenames**)")
-                    st.caption(
-                        ", ".join(REQUIRED_CREDENTIAL_DOCUMENTS)
-                        + " — e.g. `resume.pdf`, `medical_license.pdf`, `dea_certificate.pdf`."
-                    )
-                    if found:
-                        st.success("Matched now: **" + "**, **".join(sorted(found)) + "**")
-                    if missing:
-                        st.warning("Not matched from filenames: **" + "**, **".join(missing) + "**")
-                    else:
-                        st.success("All five required types appear to be present (by filename).")
+                    _render_required_document_checklist(fnames)
                 st.markdown("**Attachments**")
                 for att in atts:
                     st.write(f"- {att.get('filename', '(unnamed)')}")
@@ -472,7 +490,8 @@ with tab_proc:
                     else:
                         lines: list[str] = []
                         fnames_btn = [str(att.get("filename") or "") for att in atts]
-                        missing_btn = missing_required_documents(fnames_btn)
+                        report_btn = build_attachment_match_report(fnames_btn)
+                        missing_btn = list(report_btn.missing_categories)
                         if not missing_btn:
                             st.session_state.pop(f"missing_docs_mail_{open_uid}", None)
                         else:
@@ -480,7 +499,7 @@ with tab_proc:
                             if not st.session_state.get(notify_key):
                                 ok_mail, mailmsg = send_missing_credentialing_documents_email(
                                     sender_addr,
-                                    missing_btn,
+                                    fnames_btn,
                                     detail.get("subject"),
                                     detail.get("message_id"),
                                 )

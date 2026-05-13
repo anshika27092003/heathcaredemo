@@ -11,7 +11,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from credential_documents import REQUIRED_CREDENTIAL_DOCUMENTS
+from credential_documents import REQUIRED_CREDENTIAL_DOCUMENTS, build_attachment_match_report
 
 # Load .env once when this module is imported (Streamlit reloads modules often).
 load_dotenv()
@@ -132,12 +132,13 @@ def send_credentialing_email(to_address: str) -> tuple[bool, str]:
 
 def send_missing_credentialing_documents_email(
     to_address: str,
-    missing_labels: list[str],
+    attachment_filenames: list[str],
     original_subject: Optional[str] = None,
     in_reply_to_message_id: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
-    Notify a provider that required attachment types were not found (by filename).
+    Notify a provider which credentialing attachment types are **still pending**, based on
+    attachment **filenames**. Lists what we could recognize as received and what remains missing.
 
     Uses the same SMTP settings as ``send_credentialing_email``. Optionally sets
     ``In-Reply-To`` / ``References`` when ``in_reply_to_message_id`` is provided.
@@ -145,6 +146,9 @@ def send_missing_credentialing_documents_email(
     to_address = to_address.strip()
     if not to_address:
         return False, "Recipient address is missing."
+
+    report = build_attachment_match_report(attachment_filenames)
+    missing_labels = list(report.missing_categories)
     if not missing_labels:
         return True, "Nothing to send (all required documents were matched)."
 
@@ -167,17 +171,43 @@ def send_missing_credentialing_documents_email(
     numbered_required = "\n".join(
         f"  {i}. {label}" for i, label in enumerate(REQUIRED_CREDENTIAL_DOCUMENTS, start=1)
     )
-    missing_bullets = "\n".join(f"  - {m}" for m in missing_labels)
+
+    received_lines: list[str] = []
+    for label in REQUIRED_CREDENTIAL_DOCUMENTS:
+        files = report.matched_by_category.get(label, ())
+        if files:
+            received_lines.append(f"  - {label}: {', '.join(files)}")
+    received_block = (
+        "\n".join(received_lines)
+        if received_lines
+        else "  (none of the five types could be matched from the current file names.)"
+    )
+
+    pending_bullets = "\n".join(f"  - {m}" for m in missing_labels)
+
+    unc = list(report.unmatched_filenames)
+    unc_block = (
+        "\n".join(f"  - {u}" for u in unc)
+        if unc
+        else "  (none — every attachment name matched one of the five types.)"
+    )
 
     body = f"""Dear Provider,
 
-We received your message, but the following required credentialing documents were not identified from the attachment filenames:
+Thank you for your message. We reviewed the **file names** of your attachments (automated matching).
 
-{missing_bullets}
+**We recognized these required documents (from file names):**
+{received_block}
 
-Please reply with **all** required documents attached in **one** email. Use clear file names when possible (for example: resume.pdf, medical_license.pdf, dea_certificate.pdf).
+**These required documents are still pending — please submit them as well** (you may include them in a reply together with any updated files):
+{pending_bullets}
 
-Required documents (all five):
+**Attachments we could not match** to a required type (if one of these is a required document, please rename the file, e.g. dea_certificate.pdf, board_certification.pdf, insurance.pdf):
+{unc_block}
+
+Please send **all remaining items** when you can, ideally in **one** email with clear names.
+
+Full checklist (all five are required):
 {numbered_required}
 
 Regards,
