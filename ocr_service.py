@@ -15,6 +15,8 @@ from typing import Optional, Union
 
 from dotenv import load_dotenv
 
+from service_account_json import normalize_service_account_json_string
+
 load_dotenv()
 
 MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
@@ -75,7 +77,7 @@ def _load_document_ai_settings() -> Union[tuple[dict, str, str, str], str]:
     load_dotenv(override=False)
 
     raw: dict | None = None
-    json_env = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "").strip()
+    json_env = normalize_service_account_json_string(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "")
     if json_env:
         try:
             loaded = json.loads(json_env)

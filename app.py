@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
+from service_account_json import normalize_service_account_json_string
+
 # Must be the first Streamlit API call (Community Cloud will show "Error running app" otherwise).
 st.set_page_config(
     page_title="Credentialing Admin",
@@ -74,6 +76,7 @@ def _apply_streamlit_secrets_to_environ() -> None:
             os.environ["GCP_PROJECT_ID"] = proj
 
     if sa_json:
+        sa_json = normalize_service_account_json_string(sa_json)
         try:
             parsed = json.loads(sa_json)
             if isinstance(parsed, dict):
