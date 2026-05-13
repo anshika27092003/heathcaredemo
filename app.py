@@ -2,6 +2,7 @@
 Streamlit admin UI: manage provider emails and trigger credentialing notifications.
 """
 
+import inspect
 import json
 import os
 import tempfile
@@ -96,6 +97,17 @@ from email_service import send_credentialing_email
 
 # mail_reader / ocr_service are imported lazily where used so the first paint does not
 # load IMAP + Google Document AI stacks until you open inbox / run OCR.
+
+
+def _insert_provider_document_safe(**kwargs: object) -> tuple[bool, str]:
+    """
+    Call ``database.insert_provider_document`` with only arguments the deployed
+    ``database.py`` supports (avoids TypeError when GitHub has new ``app.py`` but an
+    older ``database.py`` on another fork/repo).
+    """
+    sig = inspect.signature(db.insert_provider_document)
+    allowed = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return db.insert_provider_document(**allowed)
 
 
 def _format_added_at(iso_ts: str) -> str:
@@ -462,7 +474,7 @@ with tab_proc:
                                 )
 
                                 cat, fields = categorize_and_structure(fname, text, method)
-                                db.insert_provider_document(
+                                _insert_provider_document_safe(
                                     provider_id=pid,
                                     imap_uid=str(open_uid),
                                     source_subject=detail.get("subject") or "",
