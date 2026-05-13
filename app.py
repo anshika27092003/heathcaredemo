@@ -784,14 +784,20 @@ with tab_records:
                 cat = str(d.get("document_category") or "other").strip().lower()
                 if text and meth not in ("failed", "unsupported", "skipped"):
                     c2, f2 = categorize_and_structure(d["filename"], text, meth)
-                    for k, v in f2.items():
-                        if v is None:
-                            continue
-                        cur = sf.get(k)
-                        cur_s = ("" if cur is None else str(cur)).strip()
-                        new_s = str(v).strip()
-                        if new_s and not cur_s:
-                            sf[k] = v
+                    manual = str(sf.get("_manual_saved") or "").strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    )
+                    if not manual:
+                        for k, v in f2.items():
+                            if v is None:
+                                continue
+                            cur = sf.get(k)
+                            cur_s = ("" if cur is None else str(cur)).strip()
+                            new_s = str(v).strip()
+                            if new_s and not cur_s:
+                                sf[k] = v
                     if cat == "other" and c2 in ("license", "cv"):
                         cat = c2
                 if cat not in ("license", "cv", "other"):
@@ -828,9 +834,165 @@ with tab_records:
                 "click **Re-run categorization** to persist fixes into SQLite."
             )
 
+            _docs_tbl_rev = int(st.session_state.get("docs_table_revision", 0))
+
+            buckets: dict[str, list] = {"license": [], "cv": [], "other": []}
+            for d in docs:
+                dc, _sf = _display_category_and_fields(d)
+                buckets[dc if dc in buckets else "other"].append(d)
+
+            if buckets["license"]:
+                st.markdown("##### License / ID")
+                lic_rows = []
+                for d in buckets["license"]:
+                    _, sf = _display_category_and_fields(d)
+                    lic_rows.append(
+                        {
+                            "id": d["id"],
+                            "filename": d["filename"],
+                            "name": sf.get("name", ""),
+                            "license_number": sf.get("license_number", ""),
+                            "initial_license_date": sf.get("initial_license_date", "")
+                            or sf.get("issue_date", ""),
+                            "issue_date": sf.get("issue_date", ""),
+                            "expiry_date": sf.get("expiry_date", "")
+                            or sf.get("expiration_date", ""),
+                            "expiration_date": sf.get("expiration_date", "")
+                            or sf.get("expiry_date", ""),
+                            "signature": sf.get("signature_present", ""),
+                            "method": d["extraction_method"],
+                        }
+                    )
+                st.dataframe(
+                    lic_rows,
+                    hide_index=True,
+                    width="stretch",
+                    key=f"tbl_lic_{doc_pid}_{_docs_tbl_rev}",
+                )
+
+            if buckets["cv"]:
+                st.markdown("##### CV / résumé")
+                cv_rows = []
+                for d in buckets["cv"]:
+                    _, sf = _display_category_and_fields(d)
+                    desc = sf.get("description") or ""
+                    if len(desc) > 300:
+                        desc = desc[:300].rsplit(" ", 1)[0] + "…"
+                    cv_rows.append(
+                        {
+                            "id": d["id"],
+                            "filename": d["filename"],
+                            "name": sf.get("name", ""),
+                            "email": sf.get("email", ""),
+                            "phone": sf.get("phone", ""),
+                            "location": sf.get("location", ""),
+                            "description": desc,
+                            "method": d["extraction_method"],
+                        }
+                    )
+                st.dataframe(
+                    cv_rows,
+                    hide_index=True,
+                    width="stretch",
+                    key=f"tbl_cv_{doc_pid}_{_docs_tbl_rev}",
+                )
+
+            if buckets["other"]:
+                st.markdown("##### Other")
+                oth = []
+                for d in buckets["other"]:
+                    _, sf = _display_category_and_fields(d)
+                    desc = (sf.get("description") or "")[:120]
+                    if len(sf.get("description") or "") > 120:
+                        desc += "…"
+                    oth.append(
+                        {
+                            "id": d["id"],
+                            "filename": d["filename"],
+                            "method": d["extraction_method"],
+                            "name": sf.get("name", ""),
+                            "email": sf.get("email", ""),
+                            "phone": sf.get("phone", ""),
+                            "location": sf.get("location", ""),
+                            "license_number": sf.get("license_number", ""),
+                            "expiry": sf.get("expiry_date", "") or sf.get("expiration_date", ""),
+                            "issue_date": sf.get("issue_date", "") or sf.get("initial_license_date", ""),
+                            "signature": sf.get("signature_present", ""),
+                            "summary": desc,
+                            "saved": _format_added_at(d["created_at"]),
+                            "preview": (d.get("ocr_text") or "")[:120].replace("\n", " "),
+                        }
+                    )
+                st.dataframe(
+                    oth,
+                    hide_index=True,
+                    width="stretch",
+                    key=f"tbl_oth_{doc_pid}_{_docs_tbl_rev}",
+                )
+
+            st.divider()
+            st.markdown("**All documents**")
+
+            def _all_docs_flat_row(d: dict) -> dict:
+                dcat, sf = _display_category_and_fields(d)
+                summ = (sf.get("description") or "")[:100]
+                if len(sf.get("description") or "") > 100:
+                    summ += "…"
+                return {
+                    "id": d["id"],
+                    "category": dcat,
+                    "filename": d["filename"],
+                    "method": d["extraction_method"],
+                    "saved": _format_added_at(d["created_at"]),
+                    "name": sf.get("name", ""),
+                    "email": sf.get("email", ""),
+                    "phone": sf.get("phone", ""),
+                    "location": sf.get("location", ""),
+                    "summary": summ,
+                    "license_number": sf.get("license_number", ""),
+                    "expiry": sf.get("expiry_date", "") or sf.get("expiration_date", ""),
+                    "issue_date": sf.get("issue_date", "") or sf.get("initial_license_date", ""),
+                    "signature": sf.get("signature_present", ""),
+                    "preview": (d.get("ocr_text") or "")[:100].replace("\n", " "),
+                }
+
+            preview_rows = [_all_docs_flat_row(d) for d in docs]
+            st.dataframe(
+                preview_rows,
+                hide_index=True,
+                width="stretch",
+                key=f"tbl_all_{doc_pid}_{_docs_tbl_rev}",
+                column_config={
+                    "id": st.column_config.NumberColumn("Doc ID", width="small"),
+                    "summary": st.column_config.TextColumn("CV summary"),
+                    "preview": st.column_config.TextColumn("Text preview"),
+                },
+            )
+            doc_ids = [d["id"] for d in docs]
+            pick_doc = st.selectbox(
+                "View full extracted text",
+                options=doc_ids,
+                format_func=lambda did: next(
+                    (f"{d['filename']} (#{d['id']})" for d in docs if d["id"] == did),
+                    str(did),
+                ),
+                key="doc_full_pick",
+            )
+            full_row = next(d for d in docs if d["id"] == pick_doc)
+            st.text_area(
+                "Full OCR / extracted text",
+                value=full_row.get("ocr_text") or "(empty)",
+                height=300,
+                disabled=True,
+                key=f"fulltext_{pick_doc}",
+            )
+            if full_row.get("error_message"):
+                st.warning(full_row["error_message"])
+
             with st.expander("Edit extracted fields (manual corrections)", expanded=False):
                 st.caption(
                     "Pick a document, set **Document category**, adjust fields, then **Save changes**. "
+                    "Saved values are shown in the **tables above** on the next screen. "
                     "Only fields relevant to that category are written; other structured keys are left as-is."
                 )
                 edit_pick = st.selectbox(
@@ -938,12 +1100,16 @@ with tab_records:
                     updated = dict(merged)
                     for k in keys:
                         updated[k] = pack.get(k, "")
+                    updated["_manual_saved"] = "1"
                     ok_u, msg_u = _safe_update_document_classification(
                         edit_pick,
                         new_cat,
                         structured_fields_to_json(updated),
                     )
                     if ok_u:
+                        st.session_state["docs_table_revision"] = (
+                            int(st.session_state.get("docs_table_revision", 0)) + 1
+                        )
                         st.success(msg_u)
                         st.rerun()
                     else:
@@ -961,7 +1127,7 @@ with tab_records:
                     prov_email = str(prov_row.get("email") or "").strip()
                     prov_name = (prov_row.get("name") or "").strip() or "Provider"
                     st.caption(
-                        "Uses the **same required-field rules** as the tables below. "
+                        "Uses the **same required-field rules** as the **tables above**. "
                         "The message is sent to this provider’s **onboarded email** (from Provider onboarding), "
                         "not the address read from a résumé."
                     )
@@ -992,142 +1158,6 @@ with tab_records:
                                 st.success(msg_m)
                             else:
                                 st.error(msg_m)
-            buckets: dict[str, list] = {"license": [], "cv": [], "other": []}
-            for d in docs:
-                dc, _sf = _display_category_and_fields(d)
-                buckets[dc if dc in buckets else "other"].append(d)
-
-            if buckets["license"]:
-                st.markdown("##### License / ID")
-                lic_rows = []
-                for d in buckets["license"]:
-                    _, sf = _display_category_and_fields(d)
-                    lic_rows.append(
-                        {
-                            "id": d["id"],
-                            "filename": d["filename"],
-                            "name": sf.get("name", ""),
-                            "license_number": sf.get("license_number", ""),
-                            "initial_license_date": sf.get("initial_license_date", "")
-                            or sf.get("issue_date", ""),
-                            "issue_date": sf.get("issue_date", ""),
-                            "expiry_date": sf.get("expiry_date", "")
-                            or sf.get("expiration_date", ""),
-                            "expiration_date": sf.get("expiration_date", "")
-                            or sf.get("expiry_date", ""),
-                            "signature": sf.get("signature_present", ""),
-                            "method": d["extraction_method"],
-                        }
-                    )
-                st.dataframe(lic_rows, hide_index=True, width="stretch")
-
-            if buckets["cv"]:
-                st.markdown("##### CV / résumé")
-                cv_rows = []
-                for d in buckets["cv"]:
-                    _, sf = _display_category_and_fields(d)
-                    desc = sf.get("description") or ""
-                    if len(desc) > 300:
-                        desc = desc[:300].rsplit(" ", 1)[0] + "…"
-                    cv_rows.append(
-                        {
-                            "id": d["id"],
-                            "filename": d["filename"],
-                            "name": sf.get("name", ""),
-                            "email": sf.get("email", ""),
-                            "phone": sf.get("phone", ""),
-                            "location": sf.get("location", ""),
-                            "description": desc,
-                            "method": d["extraction_method"],
-                        }
-                    )
-                st.dataframe(cv_rows, hide_index=True, width="stretch")
-
-            if buckets["other"]:
-                st.markdown("##### Other")
-                oth = []
-                for d in buckets["other"]:
-                    _, sf = _display_category_and_fields(d)
-                    desc = (sf.get("description") or "")[:120]
-                    if len(sf.get("description") or "") > 120:
-                        desc += "…"
-                    oth.append(
-                        {
-                            "id": d["id"],
-                            "filename": d["filename"],
-                            "method": d["extraction_method"],
-                            "name": sf.get("name", ""),
-                            "email": sf.get("email", ""),
-                            "phone": sf.get("phone", ""),
-                            "location": sf.get("location", ""),
-                            "license_number": sf.get("license_number", ""),
-                            "expiry": sf.get("expiry_date", "") or sf.get("expiration_date", ""),
-                            "issue_date": sf.get("issue_date", "") or sf.get("initial_license_date", ""),
-                            "signature": sf.get("signature_present", ""),
-                            "summary": desc,
-                            "saved": _format_added_at(d["created_at"]),
-                            "preview": (d.get("ocr_text") or "")[:120].replace("\n", " "),
-                        }
-                    )
-                st.dataframe(oth, hide_index=True, width="stretch")
-
-            st.divider()
-            st.markdown("**All documents**")
-
-            def _all_docs_flat_row(d: dict) -> dict:
-                dcat, sf = _display_category_and_fields(d)
-                summ = (sf.get("description") or "")[:100]
-                if len(sf.get("description") or "") > 100:
-                    summ += "…"
-                return {
-                    "id": d["id"],
-                    "category": dcat,
-                    "filename": d["filename"],
-                    "method": d["extraction_method"],
-                    "saved": _format_added_at(d["created_at"]),
-                    "name": sf.get("name", ""),
-                    "email": sf.get("email", ""),
-                    "phone": sf.get("phone", ""),
-                    "location": sf.get("location", ""),
-                    "summary": summ,
-                    "license_number": sf.get("license_number", ""),
-                    "expiry": sf.get("expiry_date", "") or sf.get("expiration_date", ""),
-                    "issue_date": sf.get("issue_date", "") or sf.get("initial_license_date", ""),
-                    "signature": sf.get("signature_present", ""),
-                    "preview": (d.get("ocr_text") or "")[:100].replace("\n", " "),
-                }
-
-            preview_rows = [_all_docs_flat_row(d) for d in docs]
-            st.dataframe(
-                preview_rows,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "id": st.column_config.NumberColumn("Doc ID", width="small"),
-                    "summary": st.column_config.TextColumn("CV summary"),
-                    "preview": st.column_config.TextColumn("Text preview"),
-                },
-            )
-            doc_ids = [d["id"] for d in docs]
-            pick_doc = st.selectbox(
-                "View full extracted text",
-                options=doc_ids,
-                format_func=lambda did: next(
-                    (f"{d['filename']} (#{d['id']})" for d in docs if d["id"] == did),
-                    str(did),
-                ),
-                key="doc_full_pick",
-            )
-            full_row = next(d for d in docs if d["id"] == pick_doc)
-            st.text_area(
-                "Full OCR / extracted text",
-                value=full_row.get("ocr_text") or "(empty)",
-                height=300,
-                disabled=True,
-                key=f"fulltext_{pick_doc}",
-            )
-            if full_row.get("error_message"):
-                st.warning(full_row["error_message"])
 
 st.divider()
 with st.expander("About this MVP"):
