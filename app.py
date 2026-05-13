@@ -92,41 +92,10 @@ def _apply_streamlit_secrets_to_environ() -> None:
 _apply_streamlit_secrets_to_environ()
 
 import database as db
-from credential_documents import REQUIRED_CREDENTIAL_DOCUMENTS, build_attachment_match_report
-from email_service import send_credentialing_email, send_missing_credentialing_documents_email
+from email_service import send_credentialing_email
 
 # mail_reader / ocr_service are imported lazily where used so the first paint does not
 # load IMAP + Google Document AI stacks until you open inbox / run OCR.
-
-
-def _render_required_document_checklist(filenames: list[str]) -> None:
-    """Show which of the five required types were recognized from attachment names vs pending."""
-    rep = build_attachment_match_report(filenames)
-    st.markdown("##### Required-document checklist (by file name)")
-    col_rec, col_pend = st.columns(2)
-    with col_rec:
-        st.markdown("**Recognized**")
-        any_got = False
-        for lab in REQUIRED_CREDENTIAL_DOCUMENTS:
-            files = rep.matched_by_category.get(lab, ())
-            if files:
-                any_got = True
-                st.write(f"**{lab}** — {', '.join(files)}")
-        if not any_got:
-            st.caption("None of the five types matched these names yet.")
-    with col_pend:
-        st.markdown("**Still pending**")
-        if rep.missing_categories:
-            for lab in rep.missing_categories:
-                st.write(f"**{lab}**")
-        else:
-            st.success("All five required types are matched.")
-    if rep.unmatched_filenames:
-        st.info(
-            "**Not matched to a required type:** "
-            + ", ".join(rep.unmatched_filenames)
-            + " — if any of these are a required document, rename (e.g. `dea_certificate.pdf`)."
-        )
 
 
 def _format_added_at(iso_ts: str) -> str:
@@ -185,13 +154,7 @@ tab_onboard, tab_mail, tab_proc, tab_records = st.tabs(
 # --- Tab 1: Admin onboarding — provider name + email ---
 with tab_onboard:
     st.subheader("Onboard providers")
-    st.caption(
-        "Only messages **From** these addresses appear in **Email & inbox**. "
-        "Each provider must eventually submit **five** attachments (clear filenames help): "
-        "**CV/Resume**, **Medical License**, **DEA Certificate**, **Board Certifications**, "
-        "**Insurance Documents**. If any are missing when you process a reply, the app can "
-        "email them automatically to send everything together."
-    )
+    st.caption("Only messages **From** these addresses appear in **Email & inbox**.")
     col_form, _ = st.columns([2, 1])
     with col_form:
         with st.form("add_provider_form", clear_on_submit=True):
@@ -413,13 +376,9 @@ with tab_mail:
                     st.markdown("**Attachments**")
                     for att in atts:
                         st.write(f"- {att.get('filename', '(unnamed)')}")
-                    _render_required_document_checklist(
-                        [str(att.get("filename") or "") for att in atts]
-                    )
                     st.info(
                         "Open the **Process documents** tab to run **Google Document AI** on these files "
-                        "and save text to **provider_documents**. If anything is still **pending**, "
-                        "processing will email the provider automatically (once per message)."
+                        "and save text to **provider_documents**."
                     )
                 else:
                     st.caption("No file attachments on this message.")
@@ -438,10 +397,10 @@ with tab_proc:
     st.subheader("Process documents")
     st.caption(
         "Uses the message you opened with **Load selected message** in **Email & inbox**. "
-        "Runs **Google Document AI** on each attachment. "
-        "Five attachment types are **required** (see checklist below); if filenames do not match, "
-        "an automatic **missing-documents** email is sent to the provider (once per message). "
-        "Credentials: **Streamlit Secrets** or local **`.env`** (see `.streamlit/secrets.toml.example`)."
+        "Runs **Google Document AI** on each attachment. Credentials: **Streamlit Secrets** — "
+        "flat keys and/or `[gcp_service_account]` table (see `.streamlit/secrets.toml.example`); "
+        "or locally **`.env`** with `GOOGLE_APPLICATION_CREDENTIALS` / `GOOGLE_SERVICE_ACCOUNT_JSON`. "
+        "If errors still mention only `.env` paths, **redeploy** the app from latest **main**."
     )
 
     providers = db.list_providers()
@@ -469,9 +428,6 @@ with tab_proc:
             if not atts:
                 st.caption("No file attachments on this message.")
             else:
-                fnames = [str(att.get("filename") or "") for att in atts]
-                with st.container():
-                    _render_required_document_checklist(fnames)
                 st.markdown("**Attachments**")
                 for att in atts:
                     st.write(f"- {att.get('filename', '(unnamed)')}")
@@ -489,31 +445,6 @@ with tab_proc:
                         st.error("Sender email is not linked to an onboarded provider.")
                     else:
                         lines: list[str] = []
-                        fnames_btn = [str(att.get("filename") or "") for att in atts]
-                        report_btn = build_attachment_match_report(fnames_btn)
-                        missing_btn = list(report_btn.missing_categories)
-                        if not missing_btn:
-                            st.session_state.pop(f"missing_docs_mail_{open_uid}", None)
-                        else:
-                            notify_key = f"missing_docs_mail_{open_uid}"
-                            if not st.session_state.get(notify_key):
-                                ok_mail, mailmsg = send_missing_credentialing_documents_email(
-                                    sender_addr,
-                                    fnames_btn,
-                                    detail.get("subject"),
-                                    detail.get("message_id"),
-                                )
-                                st.session_state[notify_key] = True
-                                if ok_mail:
-                                    lines.append(
-                                        "Auto-reply sent: missing "
-                                        + ", ".join(missing_btn)
-                                        + " (asked provider to send all documents together)."
-                                    )
-                                else:
-                                    st.session_state.pop(notify_key, None)
-                                    lines.append(f"Auto-reply could not be sent: {mailmsg}")
-
                         with st.spinner(
                             "Calling Google Document AI (large PDFs or many files can take 30–90s)…"
                         ):
@@ -557,9 +488,7 @@ with tab_records:
     st.subheader("Provider records")
     st.caption(
         "Overview of every onboarded provider, then full rows from **provider_documents** "
-        "(added when you process attachments). The five required types are: **CV/Resume**, "
-        "**Medical License**, **DEA Certificate**, **Board Certifications**, **Insurance Documents** "
-        "(filename matching on process). Deleting a provider removes their document rows."
+        "(added when you process attachments). Deleting a provider removes their document rows."
     )
 
     providers = db.list_providers()

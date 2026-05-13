@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-from env_mail_utils import normalize_app_password, strip_env
+from email_service import _normalize_app_password, _strip_env
 
 load_dotenv()
 
@@ -46,13 +46,13 @@ def _decode_mime_header(value: Optional[str]) -> str:
 
 def _get_imap_settings() -> dict[str, Optional[str | int]]:
     """Mail credentials for IMAP — reuse SMTP vars unless IMAP_* overrides exist."""
-    user = strip_env(os.getenv("IMAP_USER")) or strip_env(os.getenv("SMTP_USER"))
-    password = normalize_app_password(
-        strip_env(os.getenv("IMAP_PASSWORD")) or strip_env(os.getenv("SMTP_PASSWORD"))
+    user = _strip_env(os.getenv("IMAP_USER")) or _strip_env(os.getenv("SMTP_USER"))
+    password = _normalize_app_password(
+        _strip_env(os.getenv("IMAP_PASSWORD")) or _strip_env(os.getenv("SMTP_PASSWORD"))
     )
-    host = strip_env(os.getenv("IMAP_HOST")) or "imap.gmail.com"
+    host = _strip_env(os.getenv("IMAP_HOST")) or "imap.gmail.com"
     port = int(os.getenv("IMAP_PORT", "993"))
-    mailbox = strip_env(os.getenv("IMAP_MAILBOX")) or "INBOX"
+    mailbox = _strip_env(os.getenv("IMAP_MAILBOX")) or "INBOX"
     timeout = int(os.getenv("IMAP_TIMEOUT", "45"))
     timeout = max(10, min(timeout, 300))
     return {
@@ -242,7 +242,7 @@ def load_message_with_attachments(
 
     If ``allowed_sender_emails`` is set, refuse to load when the sender is not in the set.
 
-    Returns dict with keys: from_addr, subject, date, message_id, body_preview, attachments.
+    Returns dict with keys: from_addr, subject, date, body_preview, attachments.
     Each attachment: {filename, content_type, data (bytes)}.
     """
     client, err = _imap_connect()
@@ -281,14 +281,11 @@ def load_message_with_attachments(
         body_preview = _extract_body_preview(msg)
         attachments = _extract_attachments(msg)
 
-        message_id = _decode_mime_header(msg.get("Message-ID"))
-
         client.logout()
         return True, "", {
             "from_addr": from_addr,
             "subject": subject,
             "date": date_,
-            "message_id": message_id,
             "body_preview": body_preview,
             "attachments": attachments,
         }
