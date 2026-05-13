@@ -1,0 +1,11 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+credentialing.db
+.streamlit/secrets.toml
+credentials.json
+*-sa.json
+gcp-service-account*.json
+secrets/

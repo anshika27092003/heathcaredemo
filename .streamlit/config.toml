@@ -1,0 +1,11 @@
+# Project-local Streamlit settings (this repo uses 8502 so 8501 stays free for other apps).
+[server]
+port = 8502
+# Fewer filesystem watches — often faster on Windows / synced folders (e.g. OneDrive).
+fileWatcherType = "none"
+
+[runner]
+fastReruns = true
+
+[browser]
+gatherUsageStats = false
