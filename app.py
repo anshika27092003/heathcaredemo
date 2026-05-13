@@ -2,9 +2,61 @@
 Streamlit admin UI: manage provider emails and trigger credentialing notifications.
 """
 
+import json
+import os
+import tempfile
 from datetime import datetime, timezone
 
 import streamlit as st
+
+# Must be the first Streamlit API call (Community Cloud will show "Error running app" otherwise).
+st.set_page_config(
+    page_title="Credentialing Admin",
+    page_icon="📋",
+    layout="wide",
+)
+
+
+def _apply_streamlit_secrets_to_environ() -> None:
+    """
+    Mirror ``st.secrets`` into ``os.environ`` so ``email_service`` / ``mail_reader`` /
+    ``ocr_service`` (which use ``getenv``) work on Streamlit Community Cloud.
+
+    If ``GOOGLE_SERVICE_ACCOUNT_JSON`` is set, write it to a temp file and set
+    ``GOOGLE_APPLICATION_CREDENTIALS`` (typical for Cloud where you cannot commit a key file).
+    """
+    try:
+        sec = st.secrets
+    except (FileNotFoundError, RuntimeError, KeyError):
+        return
+
+    json_key = "GOOGLE_SERVICE_ACCOUNT_JSON"
+    sa_json: str | None = None
+
+    for key, val in sec.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(val, dict):
+            continue
+        if key == json_key:
+            sa_json = str(val).strip() if val is not None else None
+            continue
+        if val is not None and str(val).strip() != "":
+            os.environ[str(key)] = str(val).strip()
+
+    if sa_json:
+        try:
+            parsed = json.loads(sa_json)
+            if isinstance(parsed, dict):
+                fd, path = tempfile.mkstemp(prefix="gcp_sa_", suffix=".json")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(parsed, f)
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+        except (json.JSONDecodeError, OSError, TypeError):
+            pass
+
+
+_apply_streamlit_secrets_to_environ()
 
 import database as db
 from email_service import send_credentialing_email
@@ -23,14 +75,6 @@ def _format_added_at(iso_ts: str) -> str:
         return dt_utc.strftime("%Y-%m-%d %H:%M UTC")
     except ValueError:
         return iso_ts
-
-
-# Page setup — clean, minimal layout.
-st.set_page_config(
-    page_title="Credentialing Admin",
-    page_icon="📋",
-    layout="wide",
-)
 
 
 @st.cache_resource
