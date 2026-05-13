@@ -1,6 +1,6 @@
-# Project-local Streamlit settings (this repo uses 8502 so 8501 stays free for other apps).
+# Do not set [server] port here: Streamlit Community Cloud health-checks localhost:8501.
+# For a different port locally, run: streamlit run app.py --server.port 8502
 [server]
-port = 8502
 # Fewer filesystem watches — often faster on Windows / synced folders (e.g. OneDrive).
 fileWatcherType = "none"
 
