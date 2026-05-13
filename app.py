@@ -101,6 +101,59 @@ except ImportError:
     # Streamlit Cloud / forks sometimes deploy app.py without the matching email_service.py.
     send_missing_details_email = None  # type: ignore[misc, assignment]
 
+
+def _missing_credentialing_labels_shim(category: str, sf: dict) -> list[str]:
+    """
+    Same rules as ``document_categorization.missing_credentialing_labels`` when that
+    symbol is missing on a partial deploy (old ``document_categorization.py``).
+    """
+    sf = sf or {}
+    c = (category or "other").strip().lower()
+    if c not in ("license", "cv", "other"):
+        c = "other"
+    missing: list[str] = []
+
+    def blank(key: str) -> bool:
+        v = sf.get(key)
+        return v is None or str(v).strip() == ""
+
+    def add(label: str, condition: bool) -> None:
+        if condition:
+            missing.append(label)
+
+    if c == "license":
+        add("Full name", blank("name"))
+        add("License number", blank("license_number"))
+        exp_ok = not blank("expiry_date") or not blank("expiration_date")
+        add("Expiration date", not exp_ok)
+        iss_ok = not blank("issue_date") or not blank("initial_license_date")
+        add("Issue / initial license date", not iss_ok)
+        sig = str(sf.get("signature_present") or "").strip().lower()
+        add("Signature status (not confirmed as yes/no)", sig not in ("yes", "no"))
+    elif c == "cv":
+        add("Name", blank("name"))
+        add("Email", blank("email"))
+        add("Phone", blank("phone"))
+        add("Location / address", blank("location"))
+    else:
+        add("Name", blank("name"))
+        add("Email", blank("email"))
+        add("Phone", blank("phone"))
+        add("License number", blank("license_number"))
+        exp_ok = not blank("expiry_date") or not blank("expiration_date")
+        add("Expiration date", not exp_ok)
+    return missing
+
+
+try:
+    from document_categorization import missing_credentialing_labels as _missing_from_mod
+except ImportError:
+    _missing_from_mod = None  # type: ignore[misc, assignment]
+
+missing_credentialing_labels = (
+    _missing_from_mod if _missing_from_mod is not None else _missing_credentialing_labels_shim
+)
+
 # mail_reader / ocr_service are imported lazily where used so the first paint does not
 # load IMAP + Google Document AI stacks until you open inbox / run OCR.
 
@@ -625,7 +678,6 @@ with tab_records:
         else:
             from document_categorization import (
                 categorize_and_structure,
-                missing_credentialing_labels,
                 structured_fields_to_json,
             )
 
