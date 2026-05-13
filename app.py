@@ -22,8 +22,10 @@ def _apply_streamlit_secrets_to_environ() -> None:
     Mirror ``st.secrets`` into ``os.environ`` so ``email_service`` / ``mail_reader`` /
     ``ocr_service`` (which use ``getenv``) work on Streamlit Community Cloud.
 
-    If ``GOOGLE_SERVICE_ACCOUNT_JSON`` is set, write it to a temp file and set
-    ``GOOGLE_APPLICATION_CREDENTIALS`` (typical for Cloud where you cannot commit a key file).
+    Supports:
+    - Flat keys (optionally lower_snake_case — normalized to UPPER_SNAKE for ``os.environ``).
+    - ``GOOGLE_SERVICE_ACCOUNT_JSON`` as a multi-line JSON string.
+    - A nested TOML table whose body looks like a GCP service account, e.g. ``[gcp_service_account]``.
     """
     try:
         sec = st.secrets
@@ -32,17 +34,44 @@ def _apply_streamlit_secrets_to_environ() -> None:
 
     json_key = "GOOGLE_SERVICE_ACCOUNT_JSON"
     sa_json: str | None = None
+    sa_from_table: dict | None = None
+
+    def _env_key(name: str) -> str:
+        return str(name).strip().upper()
+
+    def _is_service_account_table(d: object) -> bool:
+        if not isinstance(d, dict):
+            return False
+        if str(d.get("type", "")).strip() == "service_account":
+            return True
+        return "private_key" in d and "client_email" in d
 
     for key, val in sec.items():
-        if key.startswith("_"):
+        if str(key).startswith("_"):
             continue
         if isinstance(val, dict):
+            if _is_service_account_table(val):
+                sa_from_table = dict(val)
             continue
-        if key == json_key:
+        if str(key) == json_key:
             sa_json = str(val).strip() if val is not None else None
             continue
         if val is not None and str(val).strip() != "":
-            os.environ[str(key)] = str(val).strip()
+            os.environ[_env_key(str(key))] = str(val).strip()
+
+    if not sa_json and sa_from_table:
+        try:
+            sa_json = json.dumps(sa_from_table)
+        except (TypeError, ValueError):
+            sa_json = None
+
+    if sa_from_table:
+        pid = str(sa_from_table.get("processor_id") or "").strip()
+        if pid and not (os.getenv("DOCUMENT_AI_PROCESSOR_ID") or "").strip():
+            os.environ["DOCUMENT_AI_PROCESSOR_ID"] = pid
+        proj = str(sa_from_table.get("project_id") or "").strip()
+        if proj and not (os.getenv("GCP_PROJECT_ID") or "").strip():
+            os.environ["GCP_PROJECT_ID"] = proj
 
     if sa_json:
         try:
