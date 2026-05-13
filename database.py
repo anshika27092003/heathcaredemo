@@ -248,8 +248,18 @@ def insert_provider_document(
     structured_fields: str = "{}",
 ) -> tuple[bool, str]:
     """Persist one processed attachment row for a provider."""
+    # Coerce types so SQLite / json never see surprise objects (avoids TypeError on Cloud).
+    pid = int(provider_id)
+    method = str(extraction_method or "failed")
+    cat = str(document_category or "other").strip() or "other"
+    sf_raw = structured_fields if isinstance(structured_fields, str) else "{}"
+    if not (sf_raw or "").strip():
+        sf_raw = "{}"
+    err = None if error_message is None else str(error_message)
+
     created_at = datetime.now(timezone.utc).isoformat()
     with _get_connection() as conn:
+        _migrate_provider_documents_columns(conn)
         conn.execute(
             """
             INSERT INTO provider_documents (
@@ -259,17 +269,17 @@ def insert_provider_document(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                int(provider_id),
+                pid,
                 str(imap_uid),
-                source_subject or "",
-                source_from or "",
+                str(source_subject or ""),
+                str(source_from or ""),
                 str(filename),
-                mime_type or "",
-                extraction_method,
-                ocr_text or "",
-                error_message,
-                (document_category or "other").strip() or "other",
-                structured_fields or "{}",
+                str(mime_type or ""),
+                method,
+                str(ocr_text or ""),
+                err,
+                cat,
+                sf_raw,
                 created_at,
             ),
         )

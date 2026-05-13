@@ -110,13 +110,10 @@ def _format_added_at(iso_ts: str) -> str:
         return iso_ts
 
 
-@st.cache_resource
-def _bootstrap_db() -> None:
-    """SQLite DDL once per process — avoids repeating work on every Streamlit rerun."""
-    db.init_db()
-
-
-_bootstrap_db()
+# Run SQLite DDL + migrations on every load so schema upgrades apply after deploy
+# (``@st.cache_resource`` previously skipped ``init_db`` on reruns and could leave Cloud DB
+# missing new columns → insert failures / TypeErrors).
+db.init_db()
 
 # --- Lightweight styling (Streamlit-native, no custom CSS file) ---
 st.markdown(

@@ -424,4 +424,9 @@ def categorize_and_structure(
 
 
 def structured_fields_to_json(fields: dict[str, Any]) -> str:
-    return json.dumps(fields, ensure_ascii=False)
+    try:
+        return json.dumps(fields or {}, ensure_ascii=False, default=str)
+    except TypeError:
+        return "{}"
+
+
