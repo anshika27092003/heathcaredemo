@@ -28,7 +28,7 @@ _EMAIL_RE = re.compile(
 
 def detect_category(filename: str, ocr_text: str) -> str:
     fn = (filename or "").lower()
-    text = (ocr_text or "")[:12000].lower()
+    text = (ocr_text or "")[:50000].lower()
 
     # Professional / medical board certificates (often misread as CV if they say "physician").
     prof_license = any(
@@ -54,6 +54,28 @@ def detect_category(filename: str, ocr_text: str) -> str:
         or "license number" in text
     ):
         return CATEGORY_LICENSE
+
+    # Résumé / CV before generic "license in body" rules — avoids "exp" matching "Experience".
+    cv_fn = any(k in fn for k in ("resume", "cv", "curriculum", "bio_", "biography"))
+    cv_txt = any(
+        phrase in text
+        for phrase in (
+            "curriculum vitae",
+            "work experience",
+            "employment history",
+            "professional experience",
+            "professional summary",
+            "summary of qualifications",
+            "objective",
+            "education",
+            "skills",
+            "core competencies",
+            "residency and fellowship",
+            "clinical experience",
+        )
+    )
+    if cv_fn or cv_txt:
+        return CATEGORY_CV
 
     license_fn = any(
         k in fn
@@ -91,28 +113,13 @@ def detect_category(filename: str, ocr_text: str) -> str:
             "endorsement",
         )
     )
-    if license_fn or (license_txt and ("exp" in text or "dob" in text or "dln" in text)):
-        return CATEGORY_LICENSE
-
-    cv_fn = any(k in fn for k in ("resume", "cv", "curriculum", "bio_", "biography"))
-    cv_txt = any(
-        phrase in text
-        for phrase in (
-            "curriculum vitae",
-            "work experience",
-            "employment history",
-            "professional experience",
-            "professional summary",
-            "summary of qualifications",
-            "objective",
-            "education",
-            "skills",
-            "core competencies",
-            "residency and fellowship",
-        )
+    _expiry_or_dob = bool(
+        re.search(r"(?i)\b(?:expires?|expir(?:es|y)|exp\.?\s*date)\b", text)
+        or re.search(r"(?i)\b(?:dob|date\s*of\s*birth)\b", text)
+        or re.search(r"(?i)\bdln\b", text)
     )
-    if cv_fn or cv_txt:
-        return CATEGORY_CV
+    if license_fn or (license_txt and _expiry_or_dob):
+        return CATEGORY_LICENSE
 
     return CATEGORY_OTHER
 

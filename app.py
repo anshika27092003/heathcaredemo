@@ -566,7 +566,9 @@ with tab_records:
 
             st.caption(
                 "Grouped as **License**, **CV / résumé**, or **Other** from filename + OCR text. "
-                "Structured fields are **best-effort**—always verify against the original image."
+                "Structured fields are **best-effort**—always verify against the original image. "
+                "If rows show as **other** but filenames look like résumés/licenses, click **Re-run categorization** "
+                "(older logic mis-read “Experience” as an expiry hint)."
             )
 
             def _parse_structured(raw: object) -> dict:
@@ -632,40 +634,66 @@ with tab_records:
 
             if buckets["other"]:
                 st.markdown("##### Other")
-                oth = [
-                    {
-                        "id": d["id"],
-                        "filename": d["filename"],
-                        "method": d["extraction_method"],
-                        "saved": _format_added_at(d["created_at"]),
-                        "preview": (d.get("ocr_text") or "")[:160].replace("\n", " "),
-                    }
-                    for d in buckets["other"]
-                ]
+                oth = []
+                for d in buckets["other"]:
+                    sf = _parse_structured(d.get("structured_fields"))
+                    desc = (sf.get("description") or "")[:120]
+                    if len(sf.get("description") or "") > 120:
+                        desc += "…"
+                    oth.append(
+                        {
+                            "id": d["id"],
+                            "filename": d["filename"],
+                            "method": d["extraction_method"],
+                            "name": sf.get("name", ""),
+                            "email": sf.get("email", ""),
+                            "phone": sf.get("phone", ""),
+                            "location": sf.get("location", ""),
+                            "license_number": sf.get("license_number", ""),
+                            "expiry": sf.get("expiry_date", "") or sf.get("expiration_date", ""),
+                            "issue_date": sf.get("issue_date", "") or sf.get("initial_license_date", ""),
+                            "signature": sf.get("signature_present", ""),
+                            "summary": desc,
+                            "saved": _format_added_at(d["created_at"]),
+                            "preview": (d.get("ocr_text") or "")[:120].replace("\n", " "),
+                        }
+                    )
                 st.dataframe(oth, hide_index=True, width="stretch")
 
             st.divider()
             st.markdown("**All documents**")
-            preview_rows = [
-                {
+
+            def _all_docs_flat_row(d: dict) -> dict:
+                sf = _parse_structured(d.get("structured_fields"))
+                summ = (sf.get("description") or "")[:100]
+                if len(sf.get("description") or "") > 100:
+                    summ += "…"
+                return {
                     "id": d["id"],
                     "category": (d.get("document_category") or "other"),
                     "filename": d["filename"],
                     "method": d["extraction_method"],
-                    "imap_uid": d["imap_uid"],
-                    "subject": (d.get("source_subject") or "")[:60],
-                    "error": (d.get("error_message") or "")[:80],
                     "saved": _format_added_at(d["created_at"]),
-                    "preview": (d.get("ocr_text") or "")[:200].replace("\n", " "),
+                    "name": sf.get("name", ""),
+                    "email": sf.get("email", ""),
+                    "phone": sf.get("phone", ""),
+                    "location": sf.get("location", ""),
+                    "summary": summ,
+                    "license_number": sf.get("license_number", ""),
+                    "expiry": sf.get("expiry_date", "") or sf.get("expiration_date", ""),
+                    "issue_date": sf.get("issue_date", "") or sf.get("initial_license_date", ""),
+                    "signature": sf.get("signature_present", ""),
+                    "preview": (d.get("ocr_text") or "")[:100].replace("\n", " "),
                 }
-                for d in docs
-            ]
+
+            preview_rows = [_all_docs_flat_row(d) for d in docs]
             st.dataframe(
                 preview_rows,
                 hide_index=True,
                 width="stretch",
                 column_config={
                     "id": st.column_config.NumberColumn("Doc ID", width="small"),
+                    "summary": st.column_config.TextColumn("CV summary"),
                     "preview": st.column_config.TextColumn("Text preview"),
                 },
             )
