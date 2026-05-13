@@ -52,6 +52,7 @@ def _apply_streamlit_secrets_to_environ() -> None:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(parsed, f)
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+                os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"] = sa_json
         except (json.JSONDecodeError, OSError, TypeError):
             pass
 

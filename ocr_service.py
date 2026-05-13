@@ -1,8 +1,9 @@
 """
 Extract text from PDFs and images using **Google Cloud Document AI** (processor OCR).
 
-Credentials: set ``GOOGLE_APPLICATION_CREDENTIALS`` to a **JSON file path** on disk
-(service account). Never commit that file. Optional env vars override defaults below.
+Credentials (pick one): **``GOOGLE_SERVICE_ACCOUNT_JSON``** with the full service-account JSON
+(Streamlit Cloud / secrets), or **``GOOGLE_APPLICATION_CREDENTIALS``** as a path to the JSON file
+(local ``.env``). Never commit key material. Optional env vars override defaults below.
 """
 
 from __future__ import annotations
@@ -64,29 +65,44 @@ def _normalize_mime_for_document_ai(mime: str, filename: str) -> str:
     return "application/octet-stream"
 
 
-def _load_document_ai_settings() -> Union[tuple[str, str, str, str], str]:
+def _load_document_ai_settings() -> Union[tuple[dict, str, str, str], str]:
     """
-    Returns (credentials_path, project_id, location, processor_id) or a single error string.
-    """
-    load_dotenv(override=True)
-    cred_path = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip().strip('"')
-    if not cred_path:
-        return (
-            "Set GOOGLE_APPLICATION_CREDENTIALS in `.env` to the full path of your "
-            "service account JSON file (keep that file out of git)."
-        )
-    p = Path(cred_path)
-    if not p.is_absolute():
-        p = Path(__file__).resolve().parent / cred_path
-    p = p.resolve()
-    if not p.is_file():
-        return f"Credentials file not found: {p}"
+    Returns (service_account_json_dict, project_id, location, processor_id) or an error string.
 
-    try:
-        with open(p, encoding="utf-8") as f:
-            raw = json.load(f)
-    except json.JSONDecodeError as exc:
-        return f"Invalid JSON in credentials file: {exc}"
+    ``load_dotenv(override=False)`` so values injected from Streamlit secrets / bootstrap are not
+    wiped by a missing or partial local ``.env``.
+    """
+    load_dotenv(override=False)
+
+    raw: dict | None = None
+    json_env = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "").strip()
+    if json_env:
+        try:
+            loaded = json.loads(json_env)
+        except json.JSONDecodeError as exc:
+            return f"Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {exc}"
+        if not isinstance(loaded, dict):
+            return "GOOGLE_SERVICE_ACCOUNT_JSON must be a JSON object."
+        raw = loaded
+    else:
+        cred_path = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip().strip('"')
+        if not cred_path:
+            return (
+                "Missing Google credentials. Add **GOOGLE_SERVICE_ACCOUNT_JSON** (paste the full "
+                "service account JSON) to Streamlit Cloud secrets, or set "
+                "**GOOGLE_APPLICATION_CREDENTIALS** to a JSON file path in your local `.env`."
+            )
+        p = Path(cred_path)
+        if not p.is_absolute():
+            p = Path(__file__).resolve().parent / cred_path
+        p = p.resolve()
+        if not p.is_file():
+            return f"Credentials file not found: {p}"
+        try:
+            with open(p, encoding="utf-8") as f:
+                raw = json.load(f)
+        except json.JSONDecodeError as exc:
+            return f"Invalid JSON in credentials file: {exc}"
 
     project_id = (os.getenv("GCP_PROJECT_ID") or raw.get("project_id") or "").strip()
     if not project_id:
@@ -99,11 +115,11 @@ def _load_document_ai_settings() -> Union[tuple[str, str, str, str], str]:
     )
     if not processor_id:
         return (
-            "Missing Document AI processor id. Set DOCUMENT_AI_PROCESSOR_ID in `.env` "
+            "Missing Document AI processor id. Set DOCUMENT_AI_PROCESSOR_ID in `.env` / secrets "
             "or add a processor_id field to your JSON (non-standard, but supported here)."
         )
 
-    return (str(p.resolve()), project_id, location, processor_id)
+    return (raw, project_id, location, processor_id)
 
 
 def _process_with_document_ai(data: bytes, mime: str) -> tuple[str, str, Optional[str]]:
@@ -115,13 +131,7 @@ def _process_with_document_ai(data: bytes, mime: str) -> tuple[str, str, Optiona
     if isinstance(cfg, str):
         return "", "failed", cfg
 
-    cred_path, project_id, location, processor_id = cfg
-
-    try:
-        with open(cred_path, encoding="utf-8") as f:
-            info = json.load(f)
-    except OSError as exc:
-        return "", "failed", f"Could not read credentials: {exc}"
+    info, project_id, location, processor_id = cfg
 
     sa_info = {k: v for k, v in info.items() if k not in _EXTRA_SA_KEYS}
     credentials = service_account.Credentials.from_service_account_info(
