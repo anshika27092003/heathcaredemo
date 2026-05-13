@@ -174,7 +174,7 @@ def _safe_update_document_classification(
     doc_id: int, document_category: str, structured_fields: str
 ) -> tuple[bool, str]:
     """Persist manual edits or re-run output."""
-    _ensure_update_document_classification_polyfill()
+    _ensure_database_api_polyfills()
     upd = getattr(db, "update_document_classification", None)
     if not callable(upd):
         return (
@@ -201,61 +201,90 @@ def _format_added_at(iso_ts: str) -> str:
         return iso_ts
 
 
-def _ensure_update_document_classification_polyfill() -> None:
+def _ensure_database_api_polyfills() -> None:
     """
-    Some Streamlit deployments ship an older ``database.py`` without
-    ``update_document_classification``. Attach a compatible implementation so
-    **Re-run categorization** and **Save changes** on extracted fields still work.
+    Attach APIs that older ``database.py`` forks omit (partial deploys / stale Cloud repo).
+
+    Covers: ``update_document_classification``, ``delete_all_documents_for_provider``,
+    ``delete_all_documents_all_providers``.
     """
-    if callable(getattr(db, "update_document_classification", None)):
+    get_conn = getattr(db, "_get_connection", None)
+    if get_conn is None:
         return
 
-    def _migrate_cols_standalone(conn: sqlite3.Connection) -> None:
-        cur = conn.execute("PRAGMA table_info(provider_documents)")
-        columns = {row[1] for row in cur.fetchall()}
-        if "document_category" not in columns:
-            conn.execute(
-                "ALTER TABLE provider_documents ADD COLUMN document_category TEXT NOT NULL DEFAULT 'other'"
-            )
-        if "structured_fields" not in columns:
-            conn.execute(
-                "ALTER TABLE provider_documents ADD COLUMN structured_fields TEXT NOT NULL DEFAULT '{}'"
-            )
+    if not callable(getattr(db, "update_document_classification", None)):
 
-    def update_document_classification(
-        doc_id: int, document_category: str, structured_fields: str
-    ) -> None:
-        get_conn = getattr(db, "_get_connection", None)
-        if get_conn is None:
-            raise RuntimeError("database._get_connection is missing")
-        migrate_fn = getattr(db, "_migrate_provider_documents_columns", None)
-        with get_conn() as conn:
-            if callable(migrate_fn):
-                migrate_fn(conn)
-            else:
-                _migrate_cols_standalone(conn)
-            conn.execute(
-                """
-                UPDATE provider_documents
-                SET document_category = ?, structured_fields = ?
-                WHERE id = ?
-                """,
-                (
-                    (document_category or "other").strip() or "other",
-                    structured_fields or "{}",
-                    int(doc_id),
-                ),
-            )
-            conn.commit()
+        def _migrate_cols_standalone(conn: sqlite3.Connection) -> None:
+            cur = conn.execute("PRAGMA table_info(provider_documents)")
+            columns = {row[1] for row in cur.fetchall()}
+            if "document_category" not in columns:
+                conn.execute(
+                    "ALTER TABLE provider_documents ADD COLUMN document_category TEXT NOT NULL DEFAULT 'other'"
+                )
+            if "structured_fields" not in columns:
+                conn.execute(
+                    "ALTER TABLE provider_documents ADD COLUMN structured_fields TEXT NOT NULL DEFAULT '{}'"
+                )
 
-    setattr(db, "update_document_classification", update_document_classification)
+        def update_document_classification(
+            doc_id: int, document_category: str, structured_fields: str
+        ) -> None:
+            migrate_fn = getattr(db, "_migrate_provider_documents_columns", None)
+            with get_conn() as conn:
+                if callable(migrate_fn):
+                    migrate_fn(conn)
+                else:
+                    _migrate_cols_standalone(conn)
+                conn.execute(
+                    """
+                    UPDATE provider_documents
+                    SET document_category = ?, structured_fields = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        (document_category or "other").strip() or "other",
+                        structured_fields or "{}",
+                        int(doc_id),
+                    ),
+                )
+                conn.commit()
+
+        setattr(db, "update_document_classification", update_document_classification)
+
+    if not callable(getattr(db, "delete_all_documents_for_provider", None)):
+
+        def delete_all_documents_for_provider(provider_id: int) -> tuple[int, str]:
+            try:
+                pid = int(provider_id)
+            except (TypeError, ValueError):
+                return 0, "Invalid provider id."
+            with get_conn() as conn:
+                cur = conn.execute(
+                    "DELETE FROM provider_documents WHERE provider_id = ?", (pid,)
+                )
+                conn.commit()
+                n = cur.rowcount or 0
+            return n, f"Deleted {n} processed document row(s) for this provider."
+
+        setattr(db, "delete_all_documents_for_provider", delete_all_documents_for_provider)
+
+    if not callable(getattr(db, "delete_all_documents_all_providers", None)):
+
+        def delete_all_documents_all_providers() -> tuple[int, str]:
+            with get_conn() as conn:
+                cur = conn.execute("DELETE FROM provider_documents")
+                conn.commit()
+                n = cur.rowcount or 0
+            return n, f"Deleted {n} processed document row(s) across all providers."
+
+        setattr(db, "delete_all_documents_all_providers", delete_all_documents_all_providers)
 
 
 # Run SQLite DDL + migrations on every load so schema upgrades apply after deploy
 # (``@st.cache_resource`` previously skipped ``init_db`` on reruns and could leave Cloud DB
 # missing new columns → insert failures / TypeErrors).
 db.init_db()
-_ensure_update_document_classification_polyfill()
+_ensure_database_api_polyfills()
 
 # --- Lightweight styling (Streamlit-native, no custom CSS file) ---
 st.markdown(
