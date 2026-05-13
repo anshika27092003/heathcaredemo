@@ -609,23 +609,29 @@ with tab_records:
                 type="secondary",
                 help="Re-applies filename + OCR heuristics to every row (useful after upgrading logic).",
             ):
-                for d in docs:
-                    cat, fld = categorize_and_structure(
-                        d["filename"],
-                        d.get("ocr_text") or "",
-                        d.get("extraction_method") or "",
+                upd = getattr(db, "update_document_classification", None)
+                if not callable(upd):
+                    st.error(
+                        "This deployment’s **database.py** is missing `update_document_classification`. "
+                        "Sync **database.py** from the repo, then try again."
                     )
-                    db.update_document_classification(
-                        d["id"], cat, structured_fields_to_json(fld)
-                    )
-                st.success(f"Updated {len(docs)} document(s).")
-                st.rerun()
+                else:
+                    for d in docs:
+                        cat, fld = categorize_and_structure(
+                            d["filename"],
+                            d.get("ocr_text") or "",
+                            d.get("extraction_method") or "",
+                        )
+                        db.update_document_classification(
+                            d["id"], cat, structured_fields_to_json(fld)
+                        )
+                    st.success(f"Updated {len(docs)} document(s).")
+                    st.rerun()
 
             st.caption(
-                "Grouped as **License**, **CV / résumé**, or **Other** from filename + OCR text. "
-                "Structured fields are **best-effort**—always verify against the original image. "
-                "If rows show as **other** but filenames look like résumés/licenses, click **Re-run categorization** "
-                "(older logic mis-read “Experience” as an expiry hint)."
+                "Tables **auto-fill** from stored JSON plus a fresh pass over OCR text (so columns show "
+                "even if an older deploy did not save structured fields). Grouping uses the same logic; "
+                "click **Re-run categorization** to persist fixes into SQLite."
             )
 
             def _parse_structured(raw: object) -> dict:
@@ -636,18 +642,43 @@ with tab_records:
                 except json.JSONDecodeError:
                     return {}
 
+            def _display_category_and_fields(d: dict) -> tuple[str, dict]:
+                """
+                Merge DB ``structured_fields`` with a fresh pass over ``ocr_text``.
+
+                Fills table columns even when older inserts omitted JSON in SQLite (e.g. compat
+                ``insert_provider_document``) or ``document_category`` stayed ``other``.
+                """
+                sf = dict(_parse_structured(d.get("structured_fields")))
+                meth = str(d.get("extraction_method") or "")
+                text = (d.get("ocr_text") or "").strip()
+                cat = str(d.get("document_category") or "other").strip().lower()
+                if text and meth not in ("failed", "unsupported", "skipped"):
+                    c2, f2 = categorize_and_structure(d["filename"], text, meth)
+                    for k, v in f2.items():
+                        if v is None:
+                            continue
+                        cur = sf.get(k)
+                        cur_s = ("" if cur is None else str(cur)).strip()
+                        new_s = str(v).strip()
+                        if new_s and not cur_s:
+                            sf[k] = v
+                    if cat == "other" and c2 in ("license", "cv"):
+                        cat = c2
+                if cat not in ("license", "cv", "other"):
+                    cat = "other"
+                return cat, sf
+
             buckets: dict[str, list] = {"license": [], "cv": [], "other": []}
             for d in docs:
-                c = str(d.get("document_category") or "other").strip().lower()
-                if c not in buckets:
-                    c = "other"
-                buckets[c].append(d)
+                dc, _sf = _display_category_and_fields(d)
+                buckets[dc if dc in buckets else "other"].append(d)
 
             if buckets["license"]:
                 st.markdown("##### License / ID")
                 lic_rows = []
                 for d in buckets["license"]:
-                    sf = _parse_structured(d.get("structured_fields"))
+                    _, sf = _display_category_and_fields(d)
                     lic_rows.append(
                         {
                             "id": d["id"],
@@ -671,7 +702,7 @@ with tab_records:
                 st.markdown("##### CV / résumé")
                 cv_rows = []
                 for d in buckets["cv"]:
-                    sf = _parse_structured(d.get("structured_fields"))
+                    _, sf = _display_category_and_fields(d)
                     desc = sf.get("description") or ""
                     if len(desc) > 300:
                         desc = desc[:300].rsplit(" ", 1)[0] + "…"
@@ -693,7 +724,7 @@ with tab_records:
                 st.markdown("##### Other")
                 oth = []
                 for d in buckets["other"]:
-                    sf = _parse_structured(d.get("structured_fields"))
+                    _, sf = _display_category_and_fields(d)
                     desc = (sf.get("description") or "")[:120]
                     if len(sf.get("description") or "") > 120:
                         desc += "…"
@@ -721,13 +752,13 @@ with tab_records:
             st.markdown("**All documents**")
 
             def _all_docs_flat_row(d: dict) -> dict:
-                sf = _parse_structured(d.get("structured_fields"))
+                dcat, sf = _display_category_and_fields(d)
                 summ = (sf.get("description") or "")[:100]
                 if len(sf.get("description") or "") > 100:
                     summ += "…"
                 return {
                     "id": d["id"],
-                    "category": (d.get("document_category") or "other"),
+                    "category": dcat,
                     "filename": d["filename"],
                     "method": d["extraction_method"],
                     "saved": _format_added_at(d["created_at"]),
