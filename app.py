@@ -394,8 +394,10 @@ with tab_proc:
     st.subheader("Process documents")
     st.caption(
         "Uses the message you opened with **Load selected message** in **Email & inbox**. "
-        "Runs **Google Document AI** on each attachment and saves text to **provider_documents**. "
-        "Set **GOOGLE_APPLICATION_CREDENTIALS** and **DOCUMENT_AI_*** in `.env` (see `.env.example`)."
+        "Runs **Google Document AI** on each attachment. Credentials: **Streamlit Secrets** — "
+        "flat keys and/or `[gcp_service_account]` table (see `.streamlit/secrets.toml.example`); "
+        "or locally **`.env`** with `GOOGLE_APPLICATION_CREDENTIALS` / `GOOGLE_SERVICE_ACCOUNT_JSON`. "
+        "If errors still mention only `.env` paths, **redeploy** the app from latest **main**."
     )
 
     providers = db.list_providers()
