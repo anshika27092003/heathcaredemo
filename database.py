@@ -28,6 +28,20 @@ def _migrate_providers_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE providers ADD COLUMN name TEXT NOT NULL DEFAULT ''")
 
 
+def _migrate_provider_documents_columns(conn: sqlite3.Connection) -> None:
+    """Add document_category + structured_fields for OCR post-processing."""
+    cur = conn.execute("PRAGMA table_info(provider_documents)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "document_category" not in columns:
+        conn.execute(
+            "ALTER TABLE provider_documents ADD COLUMN document_category TEXT NOT NULL DEFAULT 'other'"
+        )
+    if "structured_fields" not in columns:
+        conn.execute(
+            "ALTER TABLE provider_documents ADD COLUMN structured_fields TEXT NOT NULL DEFAULT '{}'"
+        )
+
+
 def init_db() -> None:
     """Create tables if they do not exist; apply lightweight migrations."""
     with _get_connection() as conn:
@@ -60,6 +74,7 @@ def init_db() -> None:
             )
             """
         )
+        _migrate_provider_documents_columns(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_provider_documents_provider "
             "ON provider_documents(provider_id)"
@@ -229,6 +244,8 @@ def insert_provider_document(
     extraction_method: str,
     ocr_text: str,
     error_message: str | None = None,
+    document_category: str = "other",
+    structured_fields: str = "{}",
 ) -> tuple[bool, str]:
     """Persist one processed attachment row for a provider."""
     created_at = datetime.now(timezone.utc).isoformat()
@@ -237,8 +254,9 @@ def insert_provider_document(
             """
             INSERT INTO provider_documents (
                 provider_id, imap_uid, source_subject, source_from,
-                filename, mime_type, extraction_method, ocr_text, error_message, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                filename, mime_type, extraction_method, ocr_text, error_message,
+                document_category, structured_fields, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(provider_id),
@@ -250,11 +268,35 @@ def insert_provider_document(
                 extraction_method,
                 ocr_text or "",
                 error_message,
+                (document_category or "other").strip() or "other",
+                structured_fields or "{}",
                 created_at,
             ),
         )
         conn.commit()
     return True, "Saved processed document."
+
+
+def update_document_classification(
+    doc_id: int,
+    document_category: str,
+    structured_fields: str,
+) -> None:
+    """Update category + JSON field blob (used when re-running heuristics on old rows)."""
+    with _get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE provider_documents
+            SET document_category = ?, structured_fields = ?
+            WHERE id = ?
+            """,
+            (
+                (document_category or "other").strip() or "other",
+                structured_fields or "{}",
+                int(doc_id),
+            ),
+        )
+        conn.commit()
 
 
 def list_documents_for_provider(provider_id: int) -> list[dict[str, Any]]:
@@ -263,7 +305,8 @@ def list_documents_for_provider(provider_id: int) -> list[dict[str, Any]]:
         cur = conn.execute(
             """
             SELECT id, imap_uid, source_subject, filename, mime_type,
-                   extraction_method, ocr_text, error_message, created_at
+                   extraction_method, ocr_text, error_message, created_at,
+                   document_category, structured_fields
             FROM provider_documents
             WHERE provider_id = ?
             ORDER BY datetime(created_at) DESC

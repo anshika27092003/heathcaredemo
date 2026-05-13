@@ -459,6 +459,12 @@ with tab_proc:
                                     att.get("content_type") or "",
                                     att["data"],
                                 )
+                                from document_categorization import (
+                                    categorize_and_structure,
+                                    structured_fields_to_json,
+                                )
+
+                                cat, fields = categorize_and_structure(fname, text, method)
                                 db.insert_provider_document(
                                     provider_id=pid,
                                     imap_uid=str(open_uid),
@@ -469,6 +475,8 @@ with tab_proc:
                                     extraction_method=method,
                                     ocr_text=text,
                                     error_message=ocr_err,
+                                    document_category=cat,
+                                    structured_fields=structured_fields_to_json(fields),
                                 )
                                 if ocr_err and not text.strip():
                                     lines.append(f"{fname}: saved with error — {ocr_err}")
@@ -534,9 +542,106 @@ with tab_records:
         if not docs:
             st.info("No processed documents for this provider yet.")
         else:
+            from document_categorization import (
+                categorize_and_structure,
+                structured_fields_to_json,
+            )
+
+            if st.button(
+                "Re-run categorization for this provider",
+                type="secondary",
+                help="Re-applies filename + OCR heuristics to every row (useful after upgrading logic).",
+            ):
+                for d in docs:
+                    cat, fld = categorize_and_structure(
+                        d["filename"],
+                        d.get("ocr_text") or "",
+                        d.get("extraction_method") or "",
+                    )
+                    db.update_document_classification(
+                        d["id"], cat, structured_fields_to_json(fld)
+                    )
+                st.success(f"Updated {len(docs)} document(s).")
+                st.rerun()
+
+            st.caption(
+                "Grouped as **License**, **CV / résumé**, or **Other** from filename + OCR text. "
+                "Structured fields are **best-effort**—always verify against the original image."
+            )
+
+            def _parse_structured(raw: object) -> dict:
+                if raw is None:
+                    return {}
+                try:
+                    return json.loads(str(raw))
+                except json.JSONDecodeError:
+                    return {}
+
+            buckets: dict[str, list] = {"license": [], "cv": [], "other": []}
+            for d in docs:
+                c = str(d.get("document_category") or "other").strip().lower()
+                if c not in buckets:
+                    c = "other"
+                buckets[c].append(d)
+
+            if buckets["license"]:
+                st.markdown("##### License / ID")
+                lic_rows = []
+                for d in buckets["license"]:
+                    sf = _parse_structured(d.get("structured_fields"))
+                    lic_rows.append(
+                        {
+                            "id": d["id"],
+                            "filename": d["filename"],
+                            "name": sf.get("name", ""),
+                            "license_number": sf.get("license_number", ""),
+                            "expiry_date": sf.get("expiry_date", ""),
+                            "issue_date": sf.get("issue_date", ""),
+                            "method": d["extraction_method"],
+                        }
+                    )
+                st.dataframe(lic_rows, hide_index=True, width="stretch")
+
+            if buckets["cv"]:
+                st.markdown("##### CV / résumé")
+                cv_rows = []
+                for d in buckets["cv"]:
+                    sf = _parse_structured(d.get("structured_fields"))
+                    desc = sf.get("description") or ""
+                    if len(desc) > 300:
+                        desc = desc[:300].rsplit(" ", 1)[0] + "…"
+                    cv_rows.append(
+                        {
+                            "id": d["id"],
+                            "filename": d["filename"],
+                            "name": sf.get("name", ""),
+                            "phone": sf.get("phone", ""),
+                            "description": desc,
+                            "method": d["extraction_method"],
+                        }
+                    )
+                st.dataframe(cv_rows, hide_index=True, width="stretch")
+
+            if buckets["other"]:
+                st.markdown("##### Other")
+                oth = [
+                    {
+                        "id": d["id"],
+                        "filename": d["filename"],
+                        "method": d["extraction_method"],
+                        "saved": _format_added_at(d["created_at"]),
+                        "preview": (d.get("ocr_text") or "")[:160].replace("\n", " "),
+                    }
+                    for d in buckets["other"]
+                ]
+                st.dataframe(oth, hide_index=True, width="stretch")
+
+            st.divider()
+            st.markdown("**All documents**")
             preview_rows = [
                 {
                     "id": d["id"],
+                    "category": (d.get("document_category") or "other"),
                     "filename": d["filename"],
                     "method": d["extraction_method"],
                     "imap_uid": d["imap_uid"],
