@@ -595,8 +595,14 @@ with tab_records:
                             "filename": d["filename"],
                             "name": sf.get("name", ""),
                             "license_number": sf.get("license_number", ""),
-                            "expiry_date": sf.get("expiry_date", ""),
+                            "initial_license_date": sf.get("initial_license_date", "")
+                            or sf.get("issue_date", ""),
                             "issue_date": sf.get("issue_date", ""),
+                            "expiry_date": sf.get("expiry_date", "")
+                            or sf.get("expiration_date", ""),
+                            "expiration_date": sf.get("expiration_date", "")
+                            or sf.get("expiry_date", ""),
+                            "signature": sf.get("signature_present", ""),
                             "method": d["extraction_method"],
                         }
                     )
@@ -615,7 +621,9 @@ with tab_records:
                             "id": d["id"],
                             "filename": d["filename"],
                             "name": sf.get("name", ""),
+                            "email": sf.get("email", ""),
                             "phone": sf.get("phone", ""),
+                            "location": sf.get("location", ""),
                             "description": desc,
                             "method": d["extraction_method"],
                         }
