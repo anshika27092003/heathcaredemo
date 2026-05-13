@@ -11,7 +11,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from credential_documents import REQUIRED_CREDENTIAL_DOCUMENTS, build_attachment_match_report
+from env_mail_utils import normalize_app_password as _normalize_app_password
+from env_mail_utils import strip_env as _strip_env
 
 # Load .env once when this module is imported (Streamlit reloads modules often).
 load_dotenv()
@@ -24,27 +25,6 @@ Please submit your updated credentialing documents for verification.
 
 Regards,
 Admin Team"""
-
-
-def _strip_env(value: Optional[str]) -> Optional[str]:
-    """Trim accidental spaces/newlines often pasted into .env values."""
-    if value is None:
-        return None
-    s = value.strip()
-    return s if s else None
-
-
-def _normalize_app_password(password: Optional[str]) -> Optional[str]:
-    """
-    Gmail / Google Workspace App Passwords are often pasted as four groups of four letters.
-    SMTP expects one continuous 16-character password with no spaces.
-    """
-    if not password:
-        return password
-    collapsed = "".join(password.split())
-    if len(collapsed) == 16 and collapsed.isalnum():
-        return collapsed
-    return password
 
 
 def _get_smtp_settings() -> dict[str, Optional[str]]:
@@ -143,6 +123,8 @@ def send_missing_credentialing_documents_email(
     Uses the same SMTP settings as ``send_credentialing_email``. Optionally sets
     ``In-Reply-To`` / ``References`` when ``in_reply_to_message_id`` is provided.
     """
+    from credential_documents import REQUIRED_CREDENTIAL_DOCUMENTS, build_attachment_match_report
+
     to_address = to_address.strip()
     if not to_address:
         return False, "Recipient address is missing."

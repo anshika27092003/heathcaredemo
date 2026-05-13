@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-from email_service import _normalize_app_password, _strip_env
+from env_mail_utils import normalize_app_password, strip_env
 
 load_dotenv()
 
@@ -46,13 +46,13 @@ def _decode_mime_header(value: Optional[str]) -> str:
 
 def _get_imap_settings() -> dict[str, Optional[str | int]]:
     """Mail credentials for IMAP — reuse SMTP vars unless IMAP_* overrides exist."""
-    user = _strip_env(os.getenv("IMAP_USER")) or _strip_env(os.getenv("SMTP_USER"))
-    password = _normalize_app_password(
-        _strip_env(os.getenv("IMAP_PASSWORD")) or _strip_env(os.getenv("SMTP_PASSWORD"))
+    user = strip_env(os.getenv("IMAP_USER")) or strip_env(os.getenv("SMTP_USER"))
+    password = normalize_app_password(
+        strip_env(os.getenv("IMAP_PASSWORD")) or strip_env(os.getenv("SMTP_PASSWORD"))
     )
-    host = _strip_env(os.getenv("IMAP_HOST")) or "imap.gmail.com"
+    host = strip_env(os.getenv("IMAP_HOST")) or "imap.gmail.com"
     port = int(os.getenv("IMAP_PORT", "993"))
-    mailbox = _strip_env(os.getenv("IMAP_MAILBOX")) or "INBOX"
+    mailbox = strip_env(os.getenv("IMAP_MAILBOX")) or "INBOX"
     timeout = int(os.getenv("IMAP_TIMEOUT", "45"))
     timeout = max(10, min(timeout, 300))
     return {

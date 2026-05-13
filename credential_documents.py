@@ -53,6 +53,22 @@ _FILENAME_DOC_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def _normalize_filename_for_match(filename: str) -> str:
+    base = (filename or "").rsplit("/", 1)[-1].lower()
+    return base.replace("_", " ").replace("-", " ")
+
+
+def classify_attachment_filename(filename: str) -> str | None:
+    """Return one of ``REQUIRED_CREDENTIAL_DOCUMENTS`` labels, or ``None`` if no rule matched."""
+    n = _normalize_filename_for_match(filename)
+    if not n.strip():
+        return None
+    for label, needles in _FILENAME_DOC_RULES:
+        if any(needle in n for needle in needles):
+            return label
+    return None
+
+
 class AttachmentMatchReport(NamedTuple):
     """Per-attachment filename classification for UI and reminder emails."""
 
@@ -77,22 +93,6 @@ def build_attachment_match_report(filenames: list[str]) -> AttachmentMatchReport
     matched = {k: tuple(v) for k, v in buckets.items() if v}
     missing = tuple(label for label in REQUIRED_CREDENTIAL_DOCUMENTS if not buckets[label])
     return AttachmentMatchReport(matched, missing, tuple(unmatched))
-
-
-def _normalize_filename_for_match(filename: str) -> str:
-    base = (filename or "").rsplit("/", 1)[-1].lower()
-    return base.replace("_", " ").replace("-", " ")
-
-
-def classify_attachment_filename(filename: str) -> str | None:
-    """Return one of ``REQUIRED_CREDENTIAL_DOCUMENTS`` labels, or ``None`` if no rule matched."""
-    n = _normalize_filename_for_match(filename)
-    if not n.strip():
-        return None
-    for label, needles in _FILENAME_DOC_RULES:
-        if any(needle in n for needle in needles):
-            return label
-    return None
 
 
 def detected_document_categories(filenames: list[str]) -> set[str]:
