@@ -25,6 +25,246 @@ _EMAIL_RE = re.compile(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
 )
 
+# Lines that look like a headline / specialty, not a person's name (CV OCR heuristics).
+_CV_NON_NAME_SUBSTRINGS = (
+    "chronic disease",
+    "disease management",
+    "patient care",
+    "years of",
+    "year of",
+    "board-certified",
+    "board certified",
+    "internal medicine",
+    "expertise",
+    "professional summary",
+    "summary of qualifications",
+    "work experience",
+    "employment history",
+    "clinical experience",
+    "core competencies",
+    "physician with",
+    "medicine physician",
+    "secretary of",
+    "department of",
+)
+
+
+def _cv_line_likely_not_person_name(ln: str) -> bool:
+    s = (ln or "").lower()
+    if any(fragment in s for fragment in _CV_NON_NAME_SUBSTRINGS):
+        return True
+    if re.search(
+        r"\b(management|surgery|services|program|department|clinic|center|centre)\b",
+        s,
+    ) and len(ln.split()) >= 2:
+        return True
+    return False
+
+
+# One token in a Western-style person name (handles O'Brien, Mary-Jane, Q. middle initial).
+_CV_NAME_TOKEN = r"(?:[A-Z][a-z']*(?:-[A-Z][a-z']*)?|[A-Z]\.)"
+# Full name without honorific: at least two tokens (e.g. Alex Mercer, Jane Q. Public).
+_CV_NAME_CORE = _CV_NAME_TOKEN + r"(?:\s+" + _CV_NAME_TOKEN + r"){1,4}"
+
+
+def _shorten_cv_header_line(ln: str) -> str:
+    """If OCR merged the name with credentials/tagline, keep the left-hand name segment."""
+    if not ln:
+        return ln
+    for sep in (
+        r"\s+MD\b",
+        r"\s+M\.D\.?",
+        r"\s+D\.O\.?",
+        r"\s+PhD\b",
+        r"\s+RN\b",
+        r"\s+Board[-\s]",
+        r"\s+Board\s+Certified\b",
+        r"\s+Internal\s+Medicine\b",
+        r"\s+(?:E-?mail|Email|Phone|Tel|Mobile|LinkedIn)\b",
+        r"\s+\(\d{3}\)",  # phone starting on same line
+    ):
+        parts = re.split(sep, ln, maxsplit=1, flags=re.I)
+        if len(parts) > 1 and parts[0].strip():
+            return parts[0].strip()
+    return ln
+
+
+def _extract_cv_name_from_header(text: str) -> str:
+    """
+    Prefer honorific + name at the top of the résumé, before credentials
+    (avoids picking specialty lines like "Chronic Disease Management").
+    """
+    head = "\n".join((text or "").splitlines()[:10])[:800]
+    lookahead = (
+        r"(?=\s*(?:MD|M\.D\.|D\.O\.|PhD|DO|RN|PA-C|NP|Board\b|E-?mail|Email|Phone|Tel|"
+        r"Mobile|LinkedIn|\(|\d{3}[-.\s]?\d{3}|\n|\Z))"
+    )
+    m = re.search(
+        rf"(?m)^\s*((?:(?:Dr|Mr|Ms|Mrs)\.?\s+)?{_CV_NAME_CORE})\s*{lookahead}",
+        head,
+    )
+    if m:
+        cand = m.group(1).strip()
+        if not _cv_line_likely_not_person_name(cand):
+            return cand[:120]
+    return ""
+
+
+_LICENSE_NON_NAME_SUBSTRINGS = (
+    "commonwealth of",
+    "state of",
+    "secretary of",
+    "department of",
+    "bureau of",
+    "board of",
+    "professional and",
+    "occupational affairs",
+    "pennsylvania",
+    "united states",
+    "license number",
+    "expiration date",
+    "initial license",
+    "date of birth",
+    "motor vehicle",
+    "driver license",
+    "driver's license",
+    "operators license",
+    "po box",
+    "this license",
+    "verify at",
+    "not a license",
+    "display only",
+)
+
+
+def _license_probable_last_comma_first(raw: str) -> bool:
+    s = raw.replace("  ", " ").strip()
+    return bool(re.match(r"^[A-Z]{1,20},\s*[A-Z][A-Z\s'.-]{1,35}$", s))
+
+
+def _license_line_likely_not_person_name(ln: str) -> bool:
+    s = (ln or "").strip().lower()
+    if len(s) < 2:
+        return True
+    if any(x in s for x in _LICENSE_NON_NAME_SUBSTRINGS):
+        return True
+    raw = (ln or "").strip()
+    if raw.isupper() and re.search(r"\bOF\b|\bAND\b|\bTHE\b", raw):
+        if not _license_probable_last_comma_first(raw):
+            return True
+    return False
+
+
+def _extract_license_person_name(t: str) -> str:
+    """Best-effort licensee / holder name; rejects jurisdiction and agency headers."""
+    text = t or ""
+
+    m = re.search(
+        r"(?m)^\s*([A-Z][A-Z\s'.-]{1,22},\s*[A-Z][A-Z\s'.-]{1,30})\s*$",
+        text,
+    )
+    if m:
+        cand = " ".join(m.group(1).split())
+        if _license_probable_last_comma_first(cand) and not _license_line_likely_not_person_name(
+            cand.replace(",", " ")
+        ):
+            return cand.title() if cand.isupper() else cand
+
+    label_patterns = (
+        r"(?is)(?:licensee|practitioner|holder|registrant)\s*name\s*[:\n.\s-]+\s*((?:Dr\.?\s+)?[A-Z][A-Za-z'.-]*(?:[ \t]+[A-Z][A-Za-z'.-]*){1,4})\b",
+        r"(?is)(?:name|full\s*name|driver\s*name)\s*[:\n.\s-]+\s*((?:Dr\.?\s+)?[A-Z][A-Za-z'.-]*(?:[ \t]+[A-Z][A-Za-z'.-]*){1,4})\b",
+    )
+    for pat in label_patterns:
+        m = re.search(pat, text)
+        if m:
+            cand = " ".join(m.group(1).split())
+            if 3 <= len(cand) <= 85 and not _license_line_likely_not_person_name(cand):
+                return cand
+
+    m = re.search(
+        r"(?is)this\s+certifies\s+that\s+(?:Dr\.?\s+)?([A-Z][A-Za-z'.-]+(?:[ \t]+[A-Z][A-Za-z'.-]*){1,4})\b",
+        text,
+    )
+    if m:
+        cand = " ".join(m.group(1).split())
+        if not _license_line_likely_not_person_name(cand):
+            return cand[:120]
+
+    name_m = re.search(
+        r"(?is)(?:name|driver\s*name|full\s*name|fn\b)[\s:.-]+((?:Dr\.?\s+)?[A-Z][A-Za-z'.-]+(?:[ \t]+[A-Z][A-Za-z'.-]+){1,4})\b",
+        text,
+    )
+    if name_m:
+        cand = name_m.group(1).strip()
+        if not _license_line_likely_not_person_name(cand):
+            return cand
+
+    caps_same = re.search(
+        r"(?is)(?:physician\s+and\s+surgeon|medical\s+physician)\s*[:\n]?\s*((?:Dr\.?\s+)?[A-Z][A-Za-z'.-]+(?:[ \t]+[A-Z][A-Za-z'.-]*){0,4})\b",
+        text,
+    )
+    if caps_same:
+        cand = " ".join(caps_same.group(1).split())
+        if 4 <= len(cand) <= 70 and not _license_line_likely_not_person_name(cand):
+            if not any(
+                x in cand.upper()
+                for x in ("DEPARTMENT", "LICENSE", "PENNSYLVANIA", "BUREAU", "PROFESSIONAL", "FESSIONA")
+            ):
+                return cand.title() if cand.isupper() else cand
+
+    caps_next = re.search(
+        r"(?is)(?:physician\s+and\s+surgeon|medical\s+physician)[^\n]{0,160}\n\s*([A-Z][A-Za-z'.-]+(?:[ \t]+[A-Z][A-Za-z'.-]*){0,4})\b",
+        text,
+    )
+    if caps_next:
+        cand = " ".join(caps_next.group(1).split())
+        if 4 <= len(cand) <= 70 and not _license_line_likely_not_person_name(cand):
+            if not any(
+                x in cand.upper()
+                for x in ("DEPARTMENT", "LICENSE", "PENNSYLVANIA", "BUREAU", "PROFESSIONAL", "FESSIONA")
+            ):
+                return cand.title() if cand.isupper() else cand
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for ln in lines[:24]:
+        if _license_line_likely_not_person_name(ln):
+            continue
+        if 8 <= len(ln) <= 55 and re.match(r"^[A-Z][A-Z\s'.-]{6,50}$", ln):
+            if not any(
+                x in ln.upper()
+                for x in (
+                    "DEPARTMENT",
+                    "LICENSE",
+                    "PENNSYLVANIA",
+                    "BUREAU",
+                    "DISPLAY",
+                    "NOTIFY",
+                    "COMMONWEALTH",
+                    "PROFESSIONAL",
+                    "FESSIONA",
+                    "ALTERATION",
+                    "SECRETARY",
+                    "OCCUPATIONAL",
+                    "STATE OF",
+                )
+            ):
+                return " ".join(ln.split())
+
+    for ln in lines[:16]:
+        if _license_line_likely_not_person_name(ln):
+            continue
+        if 3 <= len(ln) <= 45 and re.match(
+            r"^[A-Za-z'.-]+(?:\s+[A-Za-z'.-]+){1,3}$",
+            ln,
+        ):
+            if not any(
+                w.lower() in ln.lower()
+                for w in ("license", "driver", "state", "class", "expires", "expiry")
+            ):
+                return ln
+
+    return ""
+
 
 def detect_category(filename: str, ocr_text: str) -> str:
     fn = (filename or "").lower()
@@ -265,56 +505,7 @@ def extract_license_fields(text: str) -> dict[str, str]:
         if m and len(m.group(1)) <= 18:
             out["license_number"] = m.group(1)
 
-    name_m = re.search(
-        r"(?i)(?:name|driver\s*name|full\s*name|fn\b)[\s:.-]+([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){1,4})",
-        t,
-    )
-    if name_m:
-        out["name"] = name_m.group(1).strip()
-    else:
-        caps = re.search(
-            r"(?is)(?:physician\s+and\s+surgeon|medical\s+physician)[^\n]*\n\s*([A-Z][A-Z\s'.-]{6,50})\b",
-            t,
-        )
-        if caps:
-            cand = " ".join(caps.group(1).split())
-            if not any(
-                x in cand.upper()
-                for x in ("DEPARTMENT", "LICENSE", "PENNSYLVANIA", "BUREAU", "PROFESSIONAL", "FESSIONA")
-            ):
-                out["name"] = cand.title() if cand.isupper() else cand
-        if not out["name"]:
-            lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
-            for ln in lines[:20]:
-                if 8 <= len(ln) <= 55 and re.match(r"^[A-Z][A-Z\s'.-]{6,50}$", ln):
-                    if not any(
-                        x in ln.upper()
-                        for x in (
-                            "DEPARTMENT",
-                            "LICENSE",
-                            "PENNSYLVANIA",
-                            "BUREAU",
-                            "DISPLAY",
-                            "NOTIFY",
-                            "COMMONWEALTH",
-                            "PROFESSIONAL",
-                            "FESSIONA",
-                            "ALTERATION",
-                        )
-                    ):
-                        out["name"] = " ".join(ln.split())
-                        break
-        if not out["name"]:
-            for ln in lines[:12]:
-                if 3 <= len(ln) <= 45 and re.match(
-                    r"^[A-Za-z'.-]+(?:\s+[A-Za-z'.-]+){1,3}$", ln
-                ):
-                    if not any(
-                        w.lower() in ln.lower()
-                        for w in ("license", "driver", "state", "class")
-                    ):
-                        out["name"] = ln
-                        break
+    out["name"] = _extract_license_person_name(t)
 
     return out
 
@@ -355,14 +546,20 @@ def extract_cv_fields(text: str) -> dict[str, str]:
     if name_m:
         out["name"] = name_m.group(1).strip()[:120]
     else:
+        out["name"] = _extract_cv_name_from_header(t)
+
+    if not out["name"]:
         lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
         for ln in lines[:10]:
             if "@" in ln or re.search(r"\d{3}[-.\s]?\d{3}", ln):
                 continue
+            cand = _shorten_cv_header_line(ln)
+            if _cv_line_likely_not_person_name(cand):
+                continue
             if re.match(
-                r"^(Dr\.?\s+)?[A-Z][a-zA-Z'.-]+(?:\s+[A-Z][a-zA-Z'.-]+){0,4}$",
-                ln,
-            ) and 4 <= len(ln) <= 70:
+                rf"^(?:(?:Dr|Mr|Ms|Mrs)\.?\s+)?{_CV_NAME_CORE}$",
+                cand,
+            ) and 4 <= len(cand) <= 85:
                 skip_kw = (
                     "board-certified",
                     "board certified",
@@ -374,13 +571,15 @@ def extract_cv_fields(text: str) -> dict[str, str]:
                     "summary",
                     "contact",
                 )
-                if not any(k in ln.lower() for k in skip_kw):
-                    out["name"] = ln
+                if not any(k in cand.lower() for k in skip_kw):
+                    out["name"] = cand
                     break
         if not out["name"]:
-            for ln in lines[:12]:
+            for ln in lines[:14]:
+                if _cv_line_likely_not_person_name(ln):
+                    continue
                 if 4 <= len(ln) <= 60 and re.match(
-                    r"^[A-Z][a-z]+(?:\s+[A-Z][a-z'.-]+){1,3}$",
+                    rf"^(?:(?:Dr|Mr|Ms|Mrs)\.?\s+)?{_CV_NAME_CORE}$",
                     ln,
                 ):
                     out["name"] = ln
