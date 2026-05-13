@@ -629,3 +629,46 @@ def structured_fields_to_json(fields: dict[str, Any]) -> str:
         return "{}"
 
 
+def _sf_blank(sf: dict[str, Any], key: str) -> bool:
+    v = sf.get(key)
+    return v is None or str(v).strip() == ""
+
+
+def missing_credentialing_labels(category: str, sf: dict[str, Any]) -> list[str]:
+    """
+    Human-readable labels for important fields that are empty or unclear (admin / provider follow-up).
+    """
+    sf = sf or {}
+    c = (category or "other").strip().lower()
+    if c not in ("license", "cv", "other"):
+        c = "other"
+    missing: list[str] = []
+
+    def add(label: str, condition: bool) -> None:
+        if condition:
+            missing.append(label)
+
+    if c == "license":
+        add("Full name", _sf_blank(sf, "name"))
+        add("License number", _sf_blank(sf, "license_number"))
+        exp_ok = not _sf_blank(sf, "expiry_date") or not _sf_blank(sf, "expiration_date")
+        add("Expiration date", not exp_ok)
+        iss_ok = not _sf_blank(sf, "issue_date") or not _sf_blank(sf, "initial_license_date")
+        add("Issue / initial license date", not iss_ok)
+        sig = str(sf.get("signature_present") or "").strip().lower()
+        add("Signature status (not confirmed as yes/no)", sig not in ("yes", "no"))
+    elif c == "cv":
+        add("Name", _sf_blank(sf, "name"))
+        add("Email", _sf_blank(sf, "email"))
+        add("Phone", _sf_blank(sf, "phone"))
+        add("Location / address", _sf_blank(sf, "location"))
+    else:
+        add("Name", _sf_blank(sf, "name"))
+        add("Email", _sf_blank(sf, "email"))
+        add("Phone", _sf_blank(sf, "phone"))
+        add("License number", _sf_blank(sf, "license_number"))
+        exp_ok = not _sf_blank(sf, "expiry_date") or not _sf_blank(sf, "expiration_date")
+        add("Expiration date", not exp_ok)
+    return missing
+
+

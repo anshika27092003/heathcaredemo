@@ -93,7 +93,7 @@ def _apply_streamlit_secrets_to_environ() -> None:
 _apply_streamlit_secrets_to_environ()
 
 import database as db
-from email_service import send_credentialing_email
+from email_service import send_credentialing_email, send_missing_details_email
 
 # mail_reader / ocr_service are imported lazily where used so the first paint does not
 # load IMAP + Google Document AI stacks until you open inbox / run OCR.
@@ -108,6 +108,24 @@ def _insert_provider_document_safe(**kwargs: object) -> tuple[bool, str]:
     sig = inspect.signature(db.insert_provider_document)
     allowed = {k: v for k, v in kwargs.items() if k in sig.parameters}
     return db.insert_provider_document(**allowed)
+
+
+def _safe_update_document_classification(
+    doc_id: int, document_category: str, structured_fields: str
+) -> tuple[bool, str]:
+    """Persist manual edits or re-run output; no-op message if the DB module is outdated."""
+    upd = getattr(db, "update_document_classification", None)
+    if not callable(upd):
+        return (
+            False,
+            "This deployment’s **database.py** is missing `update_document_classification`. "
+            "Sync **database.py** from the repo.",
+        )
+    try:
+        upd(int(doc_id), document_category, structured_fields or "{}")
+    except (TypeError, ValueError) as exc:
+        return False, str(exc)
+    return True, "Saved to database."
 
 
 def _format_added_at(iso_ts: str) -> str:
@@ -601,37 +619,8 @@ with tab_records:
         else:
             from document_categorization import (
                 categorize_and_structure,
+                missing_credentialing_labels,
                 structured_fields_to_json,
-            )
-
-            if st.button(
-                "Re-run categorization for this provider",
-                type="secondary",
-                help="Re-applies filename + OCR heuristics to every row (useful after upgrading logic).",
-            ):
-                upd = getattr(db, "update_document_classification", None)
-                if not callable(upd):
-                    st.error(
-                        "This deployment’s **database.py** is missing `update_document_classification`. "
-                        "Sync **database.py** from the repo, then try again."
-                    )
-                else:
-                    for d in docs:
-                        cat, fld = categorize_and_structure(
-                            d["filename"],
-                            d.get("ocr_text") or "",
-                            d.get("extraction_method") or "",
-                        )
-                        db.update_document_classification(
-                            d["id"], cat, structured_fields_to_json(fld)
-                        )
-                    st.success(f"Updated {len(docs)} document(s).")
-                    st.rerun()
-
-            st.caption(
-                "Tables **auto-fill** from stored JSON plus a fresh pass over OCR text (so columns show "
-                "even if an older deploy did not save structured fields). Grouping uses the same logic; "
-                "click **Re-run categorization** to persist fixes into SQLite."
             )
 
             def _parse_structured(raw: object) -> dict:
@@ -669,6 +658,193 @@ with tab_records:
                     cat = "other"
                 return cat, sf
 
+            if st.button(
+                "Re-run categorization for this provider",
+                type="secondary",
+                help="Re-applies filename + OCR heuristics to every row (useful after upgrading logic).",
+            ):
+                upd = getattr(db, "update_document_classification", None)
+                if not callable(upd):
+                    st.error(
+                        "This deployment’s **database.py** is missing `update_document_classification`. "
+                        "Sync **database.py** from the repo, then try again."
+                    )
+                else:
+                    for d in docs:
+                        cat, fld = categorize_and_structure(
+                            d["filename"],
+                            d.get("ocr_text") or "",
+                            d.get("extraction_method") or "",
+                        )
+                        db.update_document_classification(
+                            d["id"], cat, structured_fields_to_json(fld)
+                        )
+                    st.success(f"Updated {len(docs)} document(s).")
+                    st.rerun()
+
+            st.caption(
+                "Tables **auto-fill** from stored JSON plus a fresh pass over OCR text (so columns show "
+                "even if an older deploy did not save structured fields). Grouping uses the same logic; "
+                "click **Re-run categorization** to persist fixes into SQLite."
+            )
+
+            with st.expander("Edit extracted fields (manual corrections)", expanded=False):
+                st.caption(
+                    "Pick a document, set **Document category**, adjust fields, then **Save changes**. "
+                    "Only fields relevant to that category are written; other structured keys are left as-is."
+                )
+                edit_pick = st.selectbox(
+                    "Document to edit",
+                    options=[d["id"] for d in docs],
+                    format_func=lambda i: next(
+                        (f"{x['filename']} (#{x['id']})" for x in docs if x["id"] == i),
+                        str(i),
+                    ),
+                    key="manual_edit_doc_pick",
+                )
+                erow = next(d for d in docs if d["id"] == edit_pick)
+                dcat, merged = _display_category_and_fields(erow)
+                cats = ("license", "cv", "other")
+                cat_index = cats.index(dcat) if dcat in cats else 2
+                with st.form("manual_edit_document_form"):
+                    new_cat = st.selectbox("Document category", cats, index=cat_index)
+                    st.markdown("**Person & contact**")
+                    f_name = st.text_input(
+                        "Name / full name",
+                        value=str(merged.get("name") or ""),
+                        key=f"ed_name_{edit_pick}",
+                    )
+                    f_email = st.text_input(
+                        "Email",
+                        value=str(merged.get("email") or ""),
+                        key=f"ed_email_{edit_pick}",
+                    )
+                    f_phone = st.text_input(
+                        "Phone",
+                        value=str(merged.get("phone") or ""),
+                        key=f"ed_phone_{edit_pick}",
+                    )
+                    f_location = st.text_input(
+                        "Location",
+                        value=str(merged.get("location") or ""),
+                        key=f"ed_loc_{edit_pick}",
+                    )
+                    f_desc = st.text_area(
+                        "Description / CV summary",
+                        value=str(merged.get("description") or ""),
+                        height=100,
+                        key=f"ed_desc_{edit_pick}",
+                    )
+                    st.markdown("**License / ID**")
+                    f_lic = st.text_input(
+                        "License number",
+                        value=str(merged.get("license_number") or ""),
+                        key=f"ed_lic_{edit_pick}",
+                    )
+                    f_iss = st.text_input(
+                        "Issue date",
+                        value=str(merged.get("issue_date") or ""),
+                        key=f"ed_iss_{edit_pick}",
+                    )
+                    f_init = st.text_input(
+                        "Initial license date",
+                        value=str(merged.get("initial_license_date") or ""),
+                        key=f"ed_init_{edit_pick}",
+                    )
+                    f_exp = st.text_input(
+                        "Expiry date",
+                        value=str(merged.get("expiry_date") or ""),
+                        key=f"ed_exp_{edit_pick}",
+                    )
+                    f_exp2 = st.text_input(
+                        "Expiration date (alt)",
+                        value=str(merged.get("expiration_date") or ""),
+                        key=f"ed_exp2_{edit_pick}",
+                    )
+                    f_sig = st.text_input(
+                        "Signature present (yes / no / unknown)",
+                        value=str(merged.get("signature_present") or ""),
+                        key=f"ed_sig_{edit_pick}",
+                    )
+                    save_edits = st.form_submit_button("Save changes", type="primary")
+                if save_edits:
+                    pack = {
+                        "name": f_name,
+                        "email": f_email,
+                        "phone": f_phone,
+                        "location": f_location,
+                        "description": f_desc,
+                        "license_number": f_lic,
+                        "issue_date": f_iss,
+                        "initial_license_date": f_init,
+                        "expiry_date": f_exp,
+                        "expiration_date": f_exp2,
+                        "signature_present": f_sig,
+                    }
+                    if new_cat == "license":
+                        keys = {
+                            "name",
+                            "license_number",
+                            "issue_date",
+                            "initial_license_date",
+                            "expiry_date",
+                            "expiration_date",
+                            "signature_present",
+                        }
+                    elif new_cat == "cv":
+                        keys = {"name", "email", "phone", "location", "description"}
+                    else:
+                        keys = set(pack.keys())
+                    updated = dict(merged)
+                    for k in keys:
+                        updated[k] = pack.get(k, "")
+                    ok_u, msg_u = _safe_update_document_classification(
+                        edit_pick,
+                        new_cat,
+                        structured_fields_to_json(updated),
+                    )
+                    if ok_u:
+                        st.success(msg_u)
+                        st.rerun()
+                    else:
+                        st.error(msg_u)
+
+            with st.expander("Missing fields — email provider", expanded=False):
+                prov_row = id_to_row[doc_pid]
+                prov_email = str(prov_row.get("email") or "").strip()
+                prov_name = (prov_row.get("name") or "").strip() or "Provider"
+                st.caption(
+                    "Uses the **same required-field rules** as the tables below. "
+                    "The message is sent to this provider’s **onboarded email** (from Provider onboarding), "
+                    "not the address read from a résumé."
+                )
+                gap_list: list[tuple[str, list[str]]] = []
+                for d in docs:
+                    dc, sf = _display_category_and_fields(d)
+                    labels = missing_credentialing_labels(dc, sf)
+                    if labels:
+                        gap_list.append((str(d.get("filename") or "document"), labels))
+                if not gap_list:
+                    st.success("No required-field gaps detected for this provider’s documents.")
+                else:
+                    for fn, labels in gap_list:
+                        st.markdown(f"**{fn}**")
+                        for lab in labels:
+                            st.markdown(f"- {lab}")
+                    if st.button(
+                        "Send missing-details email to provider",
+                        type="primary",
+                        key="btn_send_missing_email",
+                    ):
+                        ok_m, msg_m = send_missing_details_email(
+                            prov_email,
+                            prov_name,
+                            gap_list,
+                        )
+                        if ok_m:
+                            st.success(msg_m)
+                        else:
+                            st.error(msg_m)
             buckets: dict[str, list] = {"license": [], "cv": [], "other": []}
             for d in docs:
                 dc, _sf = _display_category_and_fields(d)
