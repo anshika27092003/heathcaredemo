@@ -212,7 +212,7 @@ def normalize_required_credentialing_fields(
         if not cleaned:
             label = "License / professional ID" if dt == "license" else "CV / résumé"
             return None, (
-                f"Select at least one OCR field to require for **{label}**, or remove that document type."
+                f"Select at least one field to require for **{label}**, or remove that document type."
             )
         out[dt] = cleaned
     return out, ""
@@ -551,7 +551,7 @@ def insert_provider_document(
             ),
         )
         conn.commit()
-    return True, "Saved processed document."
+    return True, "Saved."
 
 
 def update_document_classification(
@@ -604,7 +604,7 @@ def delete_all_documents_for_provider(provider_id: int) -> tuple[int, str]:
         cur = conn.execute("DELETE FROM provider_documents WHERE provider_id = ?", (pid,))
         conn.commit()
         n = cur.rowcount or 0
-    return n, f"Deleted {n} processed document row(s) for this provider."
+    return n, f"Removed {n} saved file(s) for this provider."
 
 
 def delete_all_documents_all_providers() -> tuple[int, str]:
@@ -613,4 +613,4 @@ def delete_all_documents_all_providers() -> tuple[int, str]:
         cur = conn.execute("DELETE FROM provider_documents")
         conn.commit()
         n = cur.rowcount or 0
-    return n, f"Deleted {n} processed document row(s) across all providers."
+    return n, f"Removed {n} saved file(s) for all providers."

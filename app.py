@@ -15,7 +15,7 @@ from service_account_json import normalize_service_account_json_string
 
 # Must be the first Streamlit API call (Community Cloud will show "Error running app" otherwise).
 st.set_page_config(
-    page_title="Credentialing Admin",
+    page_title="Credentialing",
     page_icon="📋",
     layout="wide",
 )
@@ -226,14 +226,13 @@ def _safe_update_document_classification(
     if not callable(upd):
         return (
             False,
-            "Could not attach `update_document_classification` (needs `database._get_connection`). "
-            "Replace **database.py** with the version from this repo.",
+            "Saving is not available in this installation. Ask your technical contact to update the app.",
         )
     try:
         upd(int(doc_id), document_category, structured_fields or "{}")
     except (TypeError, ValueError, sqlite3.OperationalError) as exc:
         return False, str(exc)
-    return True, "Saved to database."
+    return True, "Saved."
 
 
 def _format_required_docs_cell(req: object) -> str:
@@ -252,7 +251,7 @@ def _format_required_docs_cell(req: object) -> str:
 
 
 def _format_required_fields_cell(row: dict) -> str:
-    """Summarize per-provider OCR field rules from onboarding."""
+    """Summarize per-provider field rules from onboarding."""
     rcf = row.get("required_credentialing_fields")
     dts = row.get("required_document_types")
     if not isinstance(rcf, dict) or not rcf:
@@ -378,11 +377,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Healthcare credentialing (MVP)")
+st.title("Healthcare credentialing")
 st.caption(
-    "Workflow: **Onboard** a provider → **Email & inbox** (send + load a reply) → **Process documents** "
-    "(Document AI into SQLite) → **Provider records** to review stored text. "
-    "Tip: avoid running the repo from a **synced OneDrive folder** for snappier loads; processing can take **15–60s** per batch."
+    "Add providers, read their email replies, pull text from attachments, then review everything under **Provider records**. "
+    "Reading files can take about half a minute for larger uploads."
 )
 
 # --- Session: flash messages after redirect-less reruns ---
@@ -395,7 +393,7 @@ tab_onboard, tab_mail, tab_proc, tab_records = st.tabs(
     [
         "Provider onboarding",
         "Email & inbox",
-        "Process documents",
+        "Read documents",
         "Provider records",
     ]
 )
@@ -407,8 +405,8 @@ with tab_onboard:
         CREDENTIALING_FIELD_OPTIONS_LICENSE,
     )
 
-    st.subheader("Onboard providers")
-    st.caption("Only messages **From** these addresses appear in **Email & inbox**.")
+    st.subheader("Add providers")
+    st.caption("Only messages **from** these addresses are listed under **Email & inbox**.")
     col_form, _ = st.columns([2, 1])
     with col_form:
         with st.form("add_provider_form", clear_on_submit=True):
@@ -432,38 +430,37 @@ with tab_onboard:
                     else "CV / résumé"
                 ),
                 help=(
-                    "After **Process documents**, the app checks whether this message includes "
-                    "every type you select here. If something is missing, an automatic email asks "
-                    "the provider to send the missing file(s) together with what they already attached."
+                    "After you read attachments on **Read documents**, we check this email for every type you list here. "
+                    "If something is still missing, we can email the provider once to send the rest together with what they already sent."
                 ),
             )
             license_field_pick: list[str] = []
             cv_field_pick: list[str] = []
             if "license" in required_doc_pick:
                 license_field_pick = st.multiselect(
-                    "License / professional ID — required OCR / structured fields",
+                    "License / professional ID — which details must be filled in",
                     options=[k for k, _ in CREDENTIALING_FIELD_OPTIONS_LICENSE],
                     default=[k for k, _ in CREDENTIALING_FIELD_OPTIONS_LICENSE],
                     format_func=lambda k: next(
                         lab for kk, lab in CREDENTIALING_FIELD_OPTIONS_LICENSE if kk == k
                     ),
                     help=(
-                        "When a file is classified as a license, **Provider records** missing-field "
-                        "checks and emails only consider these fields."
+                        "For license files, we only flag missing information for the items you leave checked here "
+                        "(under **Provider records** and in follow-up emails)."
                     ),
                     key="onboard_license_fields",
                 )
             if "cv" in required_doc_pick:
                 cv_field_pick = st.multiselect(
-                    "CV / résumé — required OCR / structured fields",
+                    "CV / résumé — which details must be filled in",
                     options=[k for k, _ in CREDENTIALING_FIELD_OPTIONS_CV],
                     default=[k for k, _ in CREDENTIALING_FIELD_OPTIONS_CV],
                     format_func=lambda k: next(
                         lab for kk, lab in CREDENTIALING_FIELD_OPTIONS_CV if kk == k
                     ),
                     help=(
-                        "When a file is classified as a CV, **Provider records** missing-field "
-                        "checks and emails only consider these fields."
+                        "For résumés, we only flag missing information for the items you leave checked here "
+                        "(under **Provider records** and in follow-up emails)."
                     ),
                     key="onboard_cv_fields",
                 )
@@ -521,7 +518,7 @@ with tab_onboard:
                 f"[{i}] {(id_to_row[i].get('name') or '').strip() or '—'} — {id_to_row[i]['email']}"
             ),
             key="delete_provider_pick",
-            help="Deletes this row from SQLite; inbox will no longer match this address.",
+            help="Removes this provider from your list. Their address will no longer appear in the inbox.",
         )
         confirm_delete = st.checkbox(
             "I understand this permanently removes this provider from the roster.",
@@ -539,16 +536,16 @@ with tab_onboard:
                 st.session_state["flash_error"] = msg_del
             st.rerun()
     else:
-        st.info("No providers onboarded yet. Enter a name and email above to add the first one.")
+        st.info("No providers yet. Add a name and email above to get started.")
 
 # --- Tab 2: Send mail + IMAP inbox + load message (preview only) ---
 with tab_mail:
     providers = db.list_providers()
     allowed_emails = db.provider_email_set()
 
-    st.subheader("Send credentialing email")
+    st.subheader("Send email to a provider")
     if not providers:
-        st.warning("Add at least one provider in **Provider onboarding** before sending mail.")
+        st.warning("Add a provider under **Provider onboarding** before sending email.")
     else:
         name_by_email = {
             p["email"]: ((p.get("name") or "").strip() or "(no name)") for p in providers
@@ -570,9 +567,9 @@ with tab_mail:
 
     st.divider()
 
-    st.subheader("Inbox (provider replies only)")
+    st.subheader("Inbox (replies from your providers)")
     st.caption(
-        "Loads the admin mailbox from `.env` (IMAP). Only messages **From** an onboarded provider address are listed."
+        "Uses the mailbox settings for this app. Only messages **from** addresses you already added under **Provider onboarding** are listed."
     )
 
     col_refresh, col_limit = st.columns([1, 2])
@@ -585,17 +582,17 @@ with tab_mail:
             max_value=50,
             value=25,
             step=5,
-            help="Scans up to 200 recent messages until this many matches from onboarded senders are found.",
+            help="Looks through recent mail until this many matching replies from your providers are found.",
         )
 
     if fetch_clicked:
         if not allowed_emails:
             st.session_state["inbox_rows"] = []
-            st.warning("Onboard at least one provider before loading the inbox.")
+            st.warning("Add at least one provider before loading the inbox.")
         else:
             from mail_reader import list_recent_messages
 
-            with st.spinner("Connecting to mail server (times out after IMAP_TIMEOUT seconds)…"):
+            with st.spinner("Connecting to your mailbox…"):
                 ok, err, rows = list_recent_messages(
                     limit=int(inbox_limit),
                     allowed_sender_emails=allowed_emails,
@@ -603,10 +600,10 @@ with tab_mail:
             if ok:
                 st.session_state["inbox_rows"] = rows
                 if rows:
-                    st.success(f"Loaded {len(rows)} message(s) from onboarded providers.")
+                    st.success(f"Loaded {len(rows)} message(s) from your providers.")
                 else:
                     st.info(
-                        "No messages from onboarded providers in the scanned range, or inbox is empty."
+                        "No messages from your providers in this range, or the inbox is empty."
                     )
             else:
                 st.session_state["inbox_rows"] = []
@@ -625,7 +622,7 @@ with tab_mail:
                 "From": r.get("from_addr", ""),
                 "Subject": r.get("subject", ""),
                 "Attachments": r.get("attachment_count", 0),
-                "UID": r.get("uid", ""),
+                "Message ref": r.get("uid", ""),
             }
             for r in inbox_rows
         ]
@@ -635,7 +632,7 @@ with tab_mail:
             width="stretch",
             column_config={
                 "Attachments": st.column_config.NumberColumn("# files", width="small"),
-                "UID": st.column_config.TextColumn("IMAP UID", width="small"),
+                "Message ref": st.column_config.TextColumn("Ref", width="small"),
             },
         )
 
@@ -652,7 +649,7 @@ with tab_mail:
         chosen = st.selectbox(
             "Open a message",
             options=labels,
-            help="Only onboarded providers appear in this list.",
+            help="Only providers you have added appear here.",
             key="inbox_message_pick",
         )
 
@@ -685,8 +682,7 @@ with tab_mail:
                     for att in atts:
                         st.write(f"- {att.get('filename', '(unnamed)')}")
                     st.info(
-                        "Open the **Process documents** tab to run **Google Document AI** on these files "
-                        "and save text to **provider_documents**."
+                        "Go to **Read documents** next to pull text from these files into this provider’s records."
                     )
                 else:
                     st.caption("No file attachments on this message.")
@@ -694,26 +690,23 @@ with tab_mail:
                 st.error(err_msg or "Could not load message.")
     else:
         if not allowed_emails:
-            st.info("Onboard providers first, then click **Refresh inbox**.")
+            st.info("Add providers first, then click **Refresh inbox**.")
         else:
             st.info(
-                "Click **Refresh inbox** to load replies from onboarded providers (requires IMAP in `.env`)."
+                "Click **Refresh inbox** to load recent replies from the providers you added."
             )
 
-# --- Tab 3: Document AI processing for the loaded message ---
+# --- Tab 3: Read attachments from the opened email ---
 with tab_proc:
-    st.subheader("Process documents")
+    st.subheader("Read documents")
     st.caption(
-        "Uses the message you opened with **Load selected message** in **Email & inbox**. "
-        "Runs **Google Document AI** on each attachment. Credentials: **Streamlit Secrets** — "
-        "flat keys and/or `[gcp_service_account]` table (see `.streamlit/secrets.toml.example`); "
-        "or locally **`.env`** with `GOOGLE_APPLICATION_CREDENTIALS` / `GOOGLE_SERVICE_ACCOUNT_JSON`. "
-        "If errors still mention only `.env` paths, **redeploy** the app from latest **main**."
+        "Works with the message you opened on **Email & inbox** using **Load selected message**. "
+        "Each attachment is read automatically; large files may take up to a minute. "
+        "Your workspace needs the usual mail and cloud credentials your team already set up for this app."
     )
     st.caption(
-        "After processing, the app compares **required document types** (set under **Provider onboarding**) "
-        "to categories detected for **this** message. If something required is missing, it sends **one** "
-        "automatic reminder email per inbox message (SMTP must be configured)."
+        "After reading files, we compare what we found with the document types you chose under **Provider onboarding**. "
+        "If something is still missing, we send **one** reminder email to that provider (outbound mail must be turned on)."
     )
 
     providers = db.list_providers()
@@ -723,7 +716,7 @@ with tab_proc:
     if not open_uid:
         st.info(
             "Go to **Email & inbox**, click **Refresh inbox**, choose a row, then **Load selected message**. "
-            "Return here to process attachments."
+            "Come back here to read the attachments."
         )
     else:
         from mail_reader import load_message_with_attachments
@@ -736,7 +729,7 @@ with tab_proc:
         if ok_msg and detail:
             st.markdown(f"**From:** {detail['from_addr']}")
             st.markdown(f"**Subject:** {detail['subject']}")
-            st.caption(f"IMAP UID **{open_uid}** — {detail.get('date') or ''}")
+            st.caption(f"Message reference **{open_uid}** — {detail.get('date') or ''}")
             atts = detail.get("attachments") or []
             if not atts:
                 st.caption("No file attachments on this message.")
@@ -745,7 +738,7 @@ with tab_proc:
                 for att in atts:
                     st.write(f"- {att.get('filename', '(unnamed)')}")
                 if st.button(
-                    "Process attachments into provider records",
+                    "Read attachments and save to records",
                     type="primary",
                     key=f"proc_{open_uid}",
                 ):
@@ -755,16 +748,16 @@ with tab_proc:
                     sender_addr = sender_email_from_header(detail["from_addr"])
                     pid = db.get_provider_id_by_email(sender_addr)
                     if pid is None:
-                        st.error("Sender email is not linked to an onboarded provider.")
+                        st.error("This sender is not on your provider list. Add them under **Provider onboarding**.")
                     else:
                         lines: list[str] = []
                         with st.spinner(
-                            "Calling Google Document AI (large PDFs or many files can take 30–90s)…"
+                            "Reading attachments… large PDFs or several files can take up to a minute."
                         ):
                             for att in atts:
                                 fname = att["filename"]
                                 if db.should_skip_attachment_processing(pid, str(open_uid), fname):
-                                    lines.append(f"Skipped (already extracted OK): {fname}")
+                                    lines.append(f"{fname}: skipped — already saved from this message")
                                     continue
                                 db.delete_failed_extractions_for_attachment(pid, str(open_uid), fname)
                                 text, method, ocr_err = extract_text_from_attachment(
@@ -792,11 +785,11 @@ with tab_proc:
                                     structured_fields=structured_fields_to_json(fields),
                                 )
                                 if ocr_err and not text.strip():
-                                    lines.append(f"{fname}: saved with error — {ocr_err}")
+                                    lines.append(f"{fname}: saved with a problem — {ocr_err}")
                                 elif ocr_err:
-                                    lines.append(f"{fname}: saved ({method}), note — {ocr_err}")
+                                    lines.append(f"{fname}: saved; note — {ocr_err}")
                                 else:
-                                    lines.append(f"{fname}: saved ({method}, {len(text)} chars)")
+                                    lines.append(f"{fname}: read and saved ({len(text)} characters)")
 
                         extra_notes: list[str] = []
                         req_fn = getattr(db, "get_provider_required_document_types", None)
@@ -810,19 +803,18 @@ with tab_proc:
                             missing = required_set - present
                             if required_set and not missing:
                                 extra_notes.append(
-                                    "All required document types for this provider are present "
-                                    "in this processed message."
+                                    "Every document type you marked as required for this provider is present in this email."
                                 )
                             elif missing:
                                 if not callable(reminder_sent_fn) or not callable(record_rem_fn):
                                     extra_notes.append(
-                                        "Required document(s) missing for this message; deploy the latest "
-                                        "**database.py** to enable automatic incomplete-submission emails."
+                                        "Some required document types are still missing. "
+                                        "Automatic reminders are not available until this app is updated—ask your technical contact."
                                     )
                                 elif reminder_sent_fn(pid, str(open_uid)):
                                     extra_notes.append(
-                                        "Required document(s) still missing; incomplete-submission "
-                                        "email was already sent for this inbox message."
+                                        "Some required document types are still missing. "
+                                        "A reminder was already sent for this email."
                                     )
                                 else:
                                     prov_row = next(
@@ -842,13 +834,12 @@ with tab_proc:
                                     mail_fn = send_missing_submission_documents_email
                                     if mail_fn is None:
                                         extra_notes.append(
-                                            "Required document(s) missing for this message, but "
-                                            "**send_missing_submission_documents_email** is not available "
-                                            "(update **email_service.py**)."
+                                            "Some required document types are still missing, "
+                                            "but reminder emails are not available in this version of the app."
                                         )
                                     elif not pe:
                                         extra_notes.append(
-                                            "Required document(s) missing but provider email is unknown."
+                                            "Some required document types are missing, but we do not have an email address on file for this provider."
                                         )
                                     else:
                                         ok_rem, msg_rem = mail_fn(
@@ -862,11 +853,10 @@ with tab_proc:
                                             extra_notes.append(msg_rem)
                                         else:
                                             extra_notes.append(
-                                                "Could not send incomplete-submission notice: "
-                                                + msg_rem
+                                                "Could not send the reminder email: " + msg_rem
                                             )
 
-                        parts = ["Processed attachments. " + " | ".join(lines)]
+                        parts = ["Finished reading attachments. " + " | ".join(lines)]
                         parts.extend(extra_notes)
                         st.session_state["flash_success"] = " ".join(parts)
                         st.rerun()
@@ -877,13 +867,13 @@ with tab_proc:
 with tab_records:
     st.subheader("Provider records")
     st.caption(
-        "Overview of every onboarded provider, then full rows from **provider_documents** "
-        "(added when you process attachments). Deleting a provider removes their document rows."
+        "See everyone you added, open the files we read from their email, and fix details if needed. "
+        "Removing a provider also removes their saved files here."
     )
 
     providers = db.list_providers()
     if not providers:
-        st.info("Onboard a provider to see records here.")
+        st.info("Add a provider first to see their records here.")
     else:
         roster_rows = [
             {
@@ -926,17 +916,17 @@ with tab_records:
         )
         docs = db.list_documents_for_provider(doc_pid)
 
-        with st.expander("Clear processed data & inbox session", expanded=False):
+        with st.expander("Clear saved files & inbox view", expanded=False):
             st.caption(
-                "Deletes rows in SQLite **`provider_documents`** (OCR text and extracted fields). "
-                "**Onboarded providers** are not removed. Inbox buttons only clear this browser session."
+                "Removes saved text and fields for processed files. Your provider list stays the same. "
+                "Clearing the inbox only affects this browser session."
             )
             confirm_del_one = st.checkbox(
                 f"I understand this removes every stored document for the selected provider (ID {doc_pid}).",
                 key="confirm_delete_docs_one",
             )
             if st.button(
-                "Delete all processed documents for this provider",
+                "Delete all saved files for this provider",
                 type="primary",
                 disabled=not confirm_del_one,
             ):
@@ -946,9 +936,9 @@ with tab_records:
                 st.rerun()
 
             st.divider()
-            st.markdown("**All providers** — destructive")
+            st.markdown("**All providers** — use with care")
             confirm_del_all = st.checkbox(
-                "I understand this deletes every processed document for **every** onboarded provider.",
+                "I understand this deletes every saved file for **every** provider.",
                 key="confirm_delete_docs_all",
             )
             wipe_phrase = st.text_input(
@@ -957,7 +947,7 @@ with tab_records:
                 help="Extra guard so this is not clicked by accident.",
             )
             if st.button(
-                "Delete all processed documents (entire database)",
+                "Delete all saved files for every provider",
                 type="secondary",
                 disabled=not confirm_del_all or wipe_phrase.strip() != "DELETE ALL DOCUMENTS",
             ):
@@ -967,10 +957,10 @@ with tab_records:
                 st.rerun()
 
             st.divider()
-            if st.button("Clear inbox session state", type="secondary"):
+            if st.button("Clear inbox view", type="secondary"):
                 st.session_state.pop("inbox_rows", None)
                 st.session_state.pop("open_uid", None)
-                st.success("Cleared loaded inbox list and open message for this session.")
+                st.success("Cleared the inbox list and the open message for this session.")
                 st.rerun()
 
         if not docs:
@@ -1023,15 +1013,14 @@ with tab_records:
                 return cat, sf
 
             if st.button(
-                "Re-run categorization for this provider",
+                "Re-check document types for this provider",
                 type="secondary",
-                help="Re-applies filename + OCR heuristics to every row (useful after upgrading logic).",
+                help="Runs the automatic type detection again on every saved file (useful after an app update).",
             ):
                 upd = getattr(db, "update_document_classification", None)
                 if not callable(upd):
                     st.error(
-                        "This deployment’s **database.py** is missing `update_document_classification`. "
-                        "Sync **database.py** from the repo, then try again."
+                        "Saving changes is not available in this installation. Ask your technical contact to update the app."
                     )
                 else:
                     for d in docs:
@@ -1043,13 +1032,12 @@ with tab_records:
                         db.update_document_classification(
                             d["id"], cat, structured_fields_to_json(fld)
                         )
-                    st.success(f"Updated {len(docs)} document(s).")
+                    st.success(f"Re-checked {len(docs)} file(s).")
                     st.rerun()
 
             st.caption(
-                "Tables **auto-fill** from stored JSON plus a fresh pass over OCR text (so columns show "
-                "even if an older deploy did not save structured fields). Grouping uses the same logic; "
-                "click **Re-run categorization** to persist fixes into SQLite."
+                "Tables fill in from saved data and a fresh pass over the original text. "
+                "Use **Re-check document types** if columns look wrong, then save edits below if you need to correct details by hand."
             )
 
             _docs_tbl_rev = int(st.session_state.get("docs_table_revision", 0))
@@ -1078,7 +1066,7 @@ with tab_records:
                             "expiration_date": sf.get("expiration_date", "")
                             or sf.get("expiry_date", ""),
                             "signature": sf.get("signature_present", ""),
-                            "method": d["extraction_method"],
+                            "How read": d["extraction_method"],
                         }
                     )
                 st.dataframe(
@@ -1086,6 +1074,9 @@ with tab_records:
                     hide_index=True,
                     width="stretch",
                     key=f"tbl_lic_{doc_pid}_{_docs_tbl_rev}",
+                    column_config={
+                        "How read": st.column_config.TextColumn("How read", width="small"),
+                    },
                 )
 
             if buckets["cv"]:
@@ -1105,7 +1096,7 @@ with tab_records:
                             "phone": sf.get("phone", ""),
                             "location": sf.get("location", ""),
                             "description": desc,
-                            "method": d["extraction_method"],
+                            "How read": d["extraction_method"],
                         }
                     )
                 st.dataframe(
@@ -1113,6 +1104,9 @@ with tab_records:
                     hide_index=True,
                     width="stretch",
                     key=f"tbl_cv_{doc_pid}_{_docs_tbl_rev}",
+                    column_config={
+                        "How read": st.column_config.TextColumn("How read", width="small"),
+                    },
                 )
 
             if buckets["other"]:
@@ -1127,7 +1121,7 @@ with tab_records:
                         {
                             "id": d["id"],
                             "filename": d["filename"],
-                            "method": d["extraction_method"],
+                            "How read": d["extraction_method"],
                             "name": sf.get("name", ""),
                             "email": sf.get("email", ""),
                             "phone": sf.get("phone", ""),
@@ -1146,6 +1140,9 @@ with tab_records:
                     hide_index=True,
                     width="stretch",
                     key=f"tbl_oth_{doc_pid}_{_docs_tbl_rev}",
+                    column_config={
+                        "How read": st.column_config.TextColumn("How read", width="small"),
+                    },
                 )
 
             st.divider()
@@ -1158,10 +1155,13 @@ with tab_records:
                     summ += "…"
                 return {
                     "id": d["id"],
-                    "category": dcat,
+                    "Document type": {
+                        "license": "License / ID",
+                        "cv": "CV / résumé",
+                        "other": "Other",
+                    }.get(dcat, dcat),
                     "filename": d["filename"],
-                    "method": d["extraction_method"],
-                    "saved": _format_added_at(d["created_at"]),
+                    "How read": d["extraction_method"],
                     "name": sf.get("name", ""),
                     "email": sf.get("email", ""),
                     "phone": sf.get("phone", ""),
@@ -1171,6 +1171,7 @@ with tab_records:
                     "expiry": sf.get("expiry_date", "") or sf.get("expiration_date", ""),
                     "issue_date": sf.get("issue_date", "") or sf.get("initial_license_date", ""),
                     "signature": sf.get("signature_present", ""),
+                    "saved": _format_added_at(d["created_at"]),
                     "preview": (d.get("ocr_text") or "")[:100].replace("\n", " "),
                 }
 
@@ -1182,13 +1183,14 @@ with tab_records:
                 key=f"tbl_all_{doc_pid}_{_docs_tbl_rev}",
                 column_config={
                     "id": st.column_config.NumberColumn("Doc ID", width="small"),
-                    "summary": st.column_config.TextColumn("CV summary"),
+                    "summary": st.column_config.TextColumn("Summary"),
                     "preview": st.column_config.TextColumn("Text preview"),
+                    "How read": st.column_config.TextColumn("How read", width="small"),
                 },
             )
             doc_ids = [d["id"] for d in docs]
             pick_doc = st.selectbox(
-                "View full extracted text",
+                "View full text from file",
                 options=doc_ids,
                 format_func=lambda did: next(
                     (f"{d['filename']} (#{d['id']})" for d in docs if d["id"] == did),
@@ -1198,7 +1200,7 @@ with tab_records:
             )
             full_row = next(d for d in docs if d["id"] == pick_doc)
             st.text_area(
-                "Full OCR / extracted text",
+                "Full text from file",
                 value=full_row.get("ocr_text") or "(empty)",
                 height=300,
                 disabled=True,
@@ -1207,11 +1209,10 @@ with tab_records:
             if full_row.get("error_message"):
                 st.warning(full_row["error_message"])
 
-            with st.expander("Edit extracted fields (manual corrections)", expanded=False):
+            with st.expander("Fix details by hand", expanded=False):
                 st.caption(
-                    "Pick a document, set **Document category**, adjust fields, then **Save changes**. "
-                    "Saved values are shown in the **tables above** on the next screen. "
-                    "Only fields relevant to that category are written; other structured keys are left as-is."
+                    "Choose a file, pick its **Document type**, change any fields, then **Save changes**. "
+                    "Updates show in the tables above after the page refreshes."
                 )
                 edit_pick = st.selectbox(
                     "Document to edit",
@@ -1226,8 +1227,14 @@ with tab_records:
                 dcat, merged = _display_category_and_fields(erow)
                 cats = ("license", "cv", "other")
                 cat_index = cats.index(dcat) if dcat in cats else 2
+                _type_labels = {"license": "License / ID", "cv": "CV / résumé", "other": "Other"}
                 with st.form("manual_edit_document_form"):
-                    new_cat = st.selectbox("Document category", cats, index=cat_index)
+                    new_cat = st.selectbox(
+                        "Document type",
+                        cats,
+                        index=cat_index,
+                        format_func=lambda c: _type_labels.get(str(c), str(c)),
+                    )
                     st.markdown("**Person & contact**")
                     f_name = st.text_input(
                         "Name / full name",
@@ -1333,21 +1340,19 @@ with tab_records:
                     else:
                         st.error(msg_u)
 
-            with st.expander("Missing fields — email provider", expanded=False):
+            with st.expander("Missing information — email the provider", expanded=False):
                 if send_missing_details_email is None:
                     st.warning(
-                        "This deployment’s **email_service.py** is missing `send_missing_details_email`. "
-                        "Deploy the latest **email_service.py** from the same branch as **app.py** (or pull "
-                        "from the repo that includes the missing-details mail helper), then redeploy."
+                        "Sending follow-up email from this screen is not available in this installation. "
+                        "Ask your technical contact to update the app."
                     )
                 else:
                     prov_row = id_to_row[doc_pid]
                     prov_email = str(prov_row.get("email") or "").strip()
                     prov_name = (prov_row.get("name") or "").strip() or "Provider"
                     st.caption(
-                        "Uses the rules from **Provider onboarding** (which structured fields must be "
-                        "present for license vs CV). The message is sent to this provider’s **onboarded email** "
-                        "(from Provider onboarding), not the address read from a résumé."
+                        "Uses the same checks as the tables above, limited to the fields you chose when you added this provider. "
+                        "The email goes to the address saved for them under **Provider onboarding**, not an address taken from a résumé."
                     )
                     gap_list: list[tuple[str, list[str]]] = []
                     for d in docs:
@@ -1356,14 +1361,14 @@ with tab_records:
                         if labels:
                             gap_list.append((str(d.get("filename") or "document"), labels))
                     if not gap_list:
-                        st.success("No required-field gaps detected for this provider’s documents.")
+                        st.success("No gaps found for the items you marked as required.")
                     else:
                         for fn, labels in gap_list:
                             st.markdown(f"**{fn}**")
                             for lab in labels:
                                 st.markdown(f"- {lab}")
                         if st.button(
-                            "Send missing-details email to provider",
+                            "Email provider about missing information",
                             type="primary",
                             key="btn_send_missing_email",
                         ):
@@ -1378,13 +1383,13 @@ with tab_records:
                                 st.error(msg_m)
 
 st.divider()
-with st.expander("About this MVP"):
+with st.expander("How this app works", expanded=False):
     st.markdown(
         """
-        - Emails are stored in **SQLite** (`credentialing.db`).
-        - Outbound mail uses **SMTP** from `.env`; inbound uses **IMAP** (defaults: Gmail host, same user/password).
-        - The inbox lists only senders whose address was **onboarded** in **Provider onboarding**.
-        - **Processed documents** live in table `provider_documents` (linked by `provider_id`); text comes from **Google Document AI**.
-        - For **Google**, use an [App Password](https://support.google.com/accounts/answer/185833) with IMAP enabled on the account.
+        - **Provider onboarding** is your approved list of people and the document types (and fields) you care about.
+        - **Email & inbox** reads the mailbox you configured for this workspace and shows replies from people on that list.
+        - **Read documents** pulls readable text from attachments and groups them as license, CV, or other.
+        - **Provider records** is where you review what was read and send gentle follow-up emails if something is incomplete.
+        - If you use Gmail or Google Workspace, turn on two-step verification and create an [app password](https://support.google.com/accounts/answer/185833) for the mailbox you connect here.
         """
     )
