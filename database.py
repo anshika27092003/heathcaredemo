@@ -2,10 +2,22 @@
 SQLite persistence for onboarded providers (name + email) and processed attachment text.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Document types the admin can mark as required at onboarding (matches ``document_categorization``).
+ALLOWED_REQUIRED_DOC_TYPES = frozenset({"license", "cv"})
+
+_OK_EXTRACTION_METHODS = (
+    "document_ai",
+    "pdf_text_layer",
+    "pdf_text_layer_partial",
+    "pdf_ocr",
+    "image_ocr",
+)
 
 # Database file lives next to the app (simple deployment).
 DB_PATH = Path(__file__).resolve().parent / "credentialing.db"
@@ -42,6 +54,35 @@ def _migrate_provider_documents_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_providers_required_documents(conn: sqlite3.Connection) -> None:
+    """Per-provider list of required submission types (license / cv), stored as JSON array."""
+    cur = conn.execute("PRAGMA table_info(providers)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "required_document_types" not in columns:
+        # SQLite does not allow bound parameters in ALTER TABLE … DEFAULT (see sqlite.org/lang_altertable.html).
+        default_json = json.dumps(["license", "cv"])
+        escaped = default_json.replace("'", "''")
+        conn.execute(
+            "ALTER TABLE providers ADD COLUMN required_document_types TEXT NOT NULL "
+            f"DEFAULT '{escaped}'"
+        )
+
+
+def _migrate_missing_submission_reminders(conn: sqlite3.Connection) -> None:
+    """Track one outbound reminder per (provider, IMAP message) so re-clicks do not spam."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS missing_submission_reminders (
+            provider_id INTEGER NOT NULL,
+            imap_uid TEXT NOT NULL,
+            sent_at TEXT NOT NULL,
+            PRIMARY KEY (provider_id, imap_uid),
+            FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
 def init_db() -> None:
     """Create tables if they do not exist; apply lightweight migrations."""
     with _get_connection() as conn:
@@ -56,6 +97,8 @@ def init_db() -> None:
             """
         )
         _migrate_providers_table(conn)
+        _migrate_providers_required_documents(conn)
+        _migrate_missing_submission_reminders(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS provider_documents (
@@ -98,10 +141,26 @@ def is_valid_email_format(email: str) -> bool:
     return True
 
 
-def add_provider(name: str, email: str) -> tuple[bool, str]:
+def normalize_required_document_types(raw: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Return a stable list of ``license`` / ``cv`` keys (subset of ``ALLOWED_REQUIRED_DOC_TYPES``)."""
+    out: list[str] = []
+    for x in raw or ():
+        key = str(x).strip().lower()
+        if key in ALLOWED_REQUIRED_DOC_TYPES and key not in out:
+            out.append(key)
+    return out
+
+
+def add_provider(
+    name: str,
+    email: str,
+    required_document_types: list[str] | tuple[str, ...] | None = None,
+) -> tuple[bool, str]:
     """
     Onboard a provider with display name and email. Returns (success, message).
     Prevents duplicate emails via UNIQUE constraint.
+
+    ``required_document_types`` must list at least one of: ``license``, ``cv``.
     """
     name = (name or "").strip()
     if not name:
@@ -113,13 +172,25 @@ def add_provider(name: str, email: str) -> tuple[bool, str]:
     if not is_valid_email_format(email):
         return False, "Invalid email format. Please enter a valid address."
 
+    req = normalize_required_document_types(
+        list(required_document_types) if required_document_types is not None else None
+    )
+    if not req:
+        return (
+            False,
+            "Select at least one required document type (License / ID and/or CV / résumé).",
+        )
+
     created_at = datetime.now(timezone.utc).isoformat()
+    req_json = json.dumps(req)
 
     try:
         with _get_connection() as conn:
+            _migrate_providers_required_documents(conn)
             conn.execute(
-                "INSERT INTO providers (name, email, created_at) VALUES (?, ?, ?)",
-                (name, email, created_at),
+                "INSERT INTO providers (name, email, created_at, required_document_types) "
+                "VALUES (?, ?, ?, ?)",
+                (name, email, created_at, req_json),
             )
             conn.commit()
     except sqlite3.IntegrityError:
@@ -131,9 +202,10 @@ def add_provider(name: str, email: str) -> tuple[bool, str]:
 def list_providers() -> list[dict[str, Any]]:
     """Return all providers (newest first) with a count of stored processed documents."""
     with _get_connection() as conn:
+        _migrate_providers_required_documents(conn)
         cur = conn.execute(
             """
-            SELECT p.id, p.name, p.email, p.created_at,
+            SELECT p.id, p.name, p.email, p.created_at, p.required_document_types,
                    (SELECT COUNT(*) FROM provider_documents d WHERE d.provider_id = p.id)
                    AS document_count
             FROM providers p
@@ -141,7 +213,97 @@ def list_providers() -> list[dict[str, Any]]:
             """
         )
         rows = cur.fetchall()
-    return [dict(row) for row in rows]
+    out = [dict(row) for row in rows]
+    for r in out:
+        r["required_document_types"] = parse_required_document_types_column(
+            r.get("required_document_types")
+        )
+    return out
+
+
+def parse_required_document_types_column(value: object) -> list[str]:
+    """Parse JSON array from DB; fall back to both types if missing or invalid."""
+    default = ["license", "cv"]
+    if value is None:
+        return list(default)
+    s = str(value).strip()
+    if not s:
+        return list(default)
+    try:
+        data = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return list(default)
+    if not isinstance(data, list):
+        return list(default)
+    norm = normalize_required_document_types([str(x) for x in data])
+    return norm if norm else list(default)
+
+
+def get_provider_required_document_types(provider_id: int) -> list[str]:
+    """Ordered list of required types for preprocessing (license / cv)."""
+    try:
+        pid = int(provider_id)
+    except (TypeError, ValueError):
+        return list(parse_required_document_types_column(None))
+    with _get_connection() as conn:
+        _migrate_providers_required_documents(conn)
+        row = conn.execute(
+            "SELECT required_document_types FROM providers WHERE id = ? LIMIT 1",
+            (pid,),
+        ).fetchone()
+    if not row:
+        return []
+    return parse_required_document_types_column(row[0])
+
+
+def document_categories_present_for_imap_message(provider_id: int, imap_uid: str) -> set[str]:
+    """
+    Distinct ``license`` / ``cv`` categories among successfully extracted rows
+    for one inbound message (same IMAP UID).
+    """
+    pid = int(provider_id)
+    uid = str(imap_uid)
+    placeholders = ",".join("?" * len(_OK_EXTRACTION_METHODS))
+    with _get_connection() as conn:
+        cur = conn.execute(
+            f"""
+            SELECT DISTINCT document_category
+            FROM provider_documents
+            WHERE provider_id = ? AND imap_uid = ?
+              AND extraction_method IN ({placeholders})
+            """,
+            (pid, uid, *_OK_EXTRACTION_METHODS),
+        )
+        raw = {str(r[0]).strip().lower() for r in cur.fetchall()}
+    return raw & ALLOWED_REQUIRED_DOC_TYPES
+
+
+def missing_submission_reminder_was_sent(provider_id: int, imap_uid: str) -> bool:
+    with _get_connection() as conn:
+        _migrate_missing_submission_reminders(conn)
+        row = conn.execute(
+            """
+            SELECT 1 FROM missing_submission_reminders
+            WHERE provider_id = ? AND imap_uid = ?
+            LIMIT 1
+            """,
+            (int(provider_id), str(imap_uid)),
+        ).fetchone()
+    return row is not None
+
+
+def record_missing_submission_reminder_sent(provider_id: int, imap_uid: str) -> None:
+    sent_at = datetime.now(timezone.utc).isoformat()
+    with _get_connection() as conn:
+        _migrate_missing_submission_reminders(conn)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO missing_submission_reminders (provider_id, imap_uid, sent_at)
+            VALUES (?, ?, ?)
+            """,
+            (int(provider_id), str(imap_uid), sent_at),
+        )
+        conn.commit()
 
 
 def provider_email_set() -> set[str]:

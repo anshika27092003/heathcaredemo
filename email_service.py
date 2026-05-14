@@ -207,3 +207,111 @@ def send_missing_details_email(
         return False, f"Network error while contacting the mail server: {exc}"
 
     return True, f"Missing-details email sent to {to_address}."
+
+
+_DOC_TYPE_DISPLAY = {
+    "license": "License / professional ID",
+    "cv": "CV / résumé",
+}
+
+
+def send_missing_submission_documents_email(
+    to_address: str,
+    provider_display_name: str,
+    received_types: list[str],
+    missing_types: list[str],
+    email_subject: Optional[str] = None,
+) -> tuple[bool, str]:
+    """
+    Tell a provider that this email submission is missing one or more document types
+    you marked as required at onboarding. Ask them to send the missing file(s) together
+    with what they already submitted (one reply with all attachments).
+    """
+    to_address = (to_address or "").strip()
+    if not to_address:
+        return False, "Recipient address is missing."
+    if not missing_types:
+        return False, "No missing document types to report."
+
+    settings = _get_smtp_settings()
+    missing_cfg = [
+        name
+        for name, key in [
+            ("SMTP_USER", settings["user"]),
+            ("SMTP_PASSWORD", settings["password"]),
+            ("SMTP_FROM or SMTP_USER", settings["from_addr"]),
+        ]
+        if not key
+    ]
+    if missing_cfg:
+        return False, (
+            "Email is not configured. Set the following in your `.env` file: "
+            + ", ".join(missing_cfg)
+        )
+
+    who = (provider_display_name or "").strip() or "Provider"
+    recv = [t for t in received_types if t in _DOC_TYPE_DISPLAY]
+    miss = [t for t in missing_types if t in _DOC_TYPE_DISPLAY]
+    if not miss:
+        return False, "No missing document types to report."
+
+    recv_human = [_DOC_TYPE_DISPLAY[t] for t in recv]
+    miss_human = [_DOC_TYPE_DISPLAY[t] for t in miss]
+
+    subject = _strip_env(email_subject) or _strip_env(os.getenv("EMAIL_MISSING_DOCS_SUBJECT"))
+    if not subject:
+        subject = "Action needed: incomplete credentialing submission"
+
+    lines: list[str] = [
+        f"Dear {who},",
+        "",
+        "Thank you for your message. After processing the attachment(s) in this submission, "
+        "the following required document type(s) were not found or could not be classified as such:",
+        "",
+    ]
+    for lab in miss_human:
+        lines.append(f"• {lab}")
+    lines.append("")
+    if recv_human:
+        lines.append("We did receive the following from this submission:")
+        for lab in recv_human:
+            lines.append(f"• {lab}")
+        lines.append("")
+    lines.extend(
+        [
+            "Please reply to this thread (or send a new email) and attach **all** required "
+            "documents together in one message — include the missing file(s) **as well as** "
+            "the document(s) you already sent — so we can process your credentialing package in one step.",
+            "",
+            "Thank you,",
+            "Credentialing team",
+        ]
+    )
+    body = "\n".join(lines)
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings["from_addr"]
+    message["To"] = to_address
+    message.set_content(body)
+
+    context = ssl.create_default_context()
+
+    try:
+        with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+            server.login(settings["user"], settings["password"])
+            server.send_message(message)
+    except smtplib.SMTPAuthenticationError as exc:
+        raw = getattr(exc, "smtp_error", b"") or b""
+        detail = raw.decode(errors="replace").strip() if isinstance(raw, bytes) else str(raw).strip()
+        suffix = f' Provider message: "{detail}"' if detail else ""
+        return False, "SMTP authentication failed. Check SMTP_USER / SMTP_PASSWORD." + suffix
+    except smtplib.SMTPException as exc:
+        return False, f"SMTP error: {exc}"
+    except OSError as exc:
+        return False, f"Network error while contacting the mail server: {exc}"
+
+    return True, f"Incomplete-submission notice sent to {to_address}."

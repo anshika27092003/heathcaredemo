@@ -102,6 +102,11 @@ except ImportError:
     # Streamlit Cloud / forks sometimes deploy app.py without the matching email_service.py.
     send_missing_details_email = None  # type: ignore[misc, assignment]
 
+try:
+    from email_service import send_missing_submission_documents_email
+except ImportError:
+    send_missing_submission_documents_email = None  # type: ignore[misc, assignment]
+
 
 def _missing_credentialing_labels_shim(category: str, sf: dict) -> list[str]:
     """
@@ -187,6 +192,21 @@ def _safe_update_document_classification(
     except (TypeError, ValueError, sqlite3.OperationalError) as exc:
         return False, str(exc)
     return True, "Saved to database."
+
+
+def _format_required_docs_cell(req: object) -> str:
+    """Short label for roster tables (``required_document_types`` is a list on provider rows)."""
+    if not isinstance(req, list) or not req:
+        return "—"
+    bits = []
+    for x in req:
+        if x == "license":
+            bits.append("License")
+        elif x == "cv":
+            bits.append("CV")
+        else:
+            bits.append(str(x))
+    return ", ".join(bits)
 
 
 def _format_added_at(iso_ts: str) -> str:
@@ -336,10 +356,25 @@ with tab_onboard:
                 placeholder="name@clinic.example",
                 help="Must match the address they send from; duplicates are rejected.",
             )
+            required_doc_pick = st.multiselect(
+                "Required documents for this provider",
+                options=["license", "cv"],
+                default=["license", "cv"],
+                format_func=lambda k: (
+                    "License / professional ID"
+                    if k == "license"
+                    else "CV / résumé"
+                ),
+                help=(
+                    "After **Process documents**, the app checks whether this message includes "
+                    "every type you select here. If something is missing, an automatic email asks "
+                    "the provider to send the missing file(s) together with what they already attached."
+                ),
+            )
             submitted = st.form_submit_button("Save provider", type="primary")
 
     if submitted:
-        ok, msg = db.add_provider(provider_name, new_email)
+        ok, msg = db.add_provider(provider_name, new_email, required_doc_pick)
         if ok:
             st.session_state["flash_success"] = msg
         else:
@@ -354,6 +389,7 @@ with tab_onboard:
                 "id": row["id"],
                 "name": (row.get("name") or "").strip() or "—",
                 "email": row["email"],
+                "required_docs": _format_required_docs_cell(row.get("required_document_types")),
                 "documents": int(row.get("document_count") or 0),
                 "added_at": _format_added_at(row["created_at"]),
             }
@@ -367,6 +403,7 @@ with tab_onboard:
                 "id": st.column_config.NumberColumn("ID", width="small"),
                 "name": st.column_config.TextColumn("Provider name"),
                 "email": st.column_config.TextColumn("Email"),
+                "required_docs": st.column_config.TextColumn("Required docs", width="medium"),
                 "documents": st.column_config.NumberColumn("Stored docs", width="small"),
                 "added_at": st.column_config.TextColumn("Added (UTC)"),
             },
@@ -570,6 +607,11 @@ with tab_proc:
         "or locally **`.env`** with `GOOGLE_APPLICATION_CREDENTIALS` / `GOOGLE_SERVICE_ACCOUNT_JSON`. "
         "If errors still mention only `.env` paths, **redeploy** the app from latest **main**."
     )
+    st.caption(
+        "After processing, the app compares **required document types** (set under **Provider onboarding**) "
+        "to categories detected for **this** message. If something required is missing, it sends **one** "
+        "automatic reminder email per inbox message (SMTP must be configured)."
+    )
 
     providers = db.list_providers()
     allowed_emails = db.provider_email_set()
@@ -652,9 +694,78 @@ with tab_proc:
                                     lines.append(f"{fname}: saved ({method}), note — {ocr_err}")
                                 else:
                                     lines.append(f"{fname}: saved ({method}, {len(text)} chars)")
-                        st.session_state["flash_success"] = "Processed attachments. " + " | ".join(
-                            lines
-                        )
+
+                        extra_notes: list[str] = []
+                        req_fn = getattr(db, "get_provider_required_document_types", None)
+                        present_fn = getattr(db, "document_categories_present_for_imap_message", None)
+                        reminder_sent_fn = getattr(db, "missing_submission_reminder_was_sent", None)
+                        record_rem_fn = getattr(db, "record_missing_submission_reminder_sent", None)
+                        if callable(req_fn) and callable(present_fn):
+                            required_list = req_fn(pid)
+                            required_set = set(required_list)
+                            present = present_fn(pid, str(open_uid))
+                            missing = required_set - present
+                            if required_set and not missing:
+                                extra_notes.append(
+                                    "All required document types for this provider are present "
+                                    "in this processed message."
+                                )
+                            elif missing:
+                                if not callable(reminder_sent_fn) or not callable(record_rem_fn):
+                                    extra_notes.append(
+                                        "Required document(s) missing for this message; deploy the latest "
+                                        "**database.py** to enable automatic incomplete-submission emails."
+                                    )
+                                elif reminder_sent_fn(pid, str(open_uid)):
+                                    extra_notes.append(
+                                        "Required document(s) still missing; incomplete-submission "
+                                        "email was already sent for this inbox message."
+                                    )
+                                else:
+                                    prov_row = next(
+                                        (
+                                            p
+                                            for p in db.list_providers()
+                                            if int(p["id"]) == int(pid)
+                                        ),
+                                        None,
+                                    )
+                                    pe = str((prov_row or {}).get("email") or "").strip()
+                                    pname = (
+                                        (prov_row or {}).get("name") or ""
+                                    ).strip() or "Provider"
+                                    recv_sorted = sorted(required_set & present)
+                                    miss_sorted = sorted(missing)
+                                    mail_fn = send_missing_submission_documents_email
+                                    if mail_fn is None:
+                                        extra_notes.append(
+                                            "Required document(s) missing for this message, but "
+                                            "**send_missing_submission_documents_email** is not available "
+                                            "(update **email_service.py**)."
+                                        )
+                                    elif not pe:
+                                        extra_notes.append(
+                                            "Required document(s) missing but provider email is unknown."
+                                        )
+                                    else:
+                                        ok_rem, msg_rem = mail_fn(
+                                            pe,
+                                            pname,
+                                            recv_sorted,
+                                            miss_sorted,
+                                        )
+                                        if ok_rem:
+                                            record_rem_fn(pid, str(open_uid))
+                                            extra_notes.append(msg_rem)
+                                        else:
+                                            extra_notes.append(
+                                                "Could not send incomplete-submission notice: "
+                                                + msg_rem
+                                            )
+
+                        parts = ["Processed attachments. " + " | ".join(lines)]
+                        parts.extend(extra_notes)
+                        st.session_state["flash_success"] = " ".join(parts)
                         st.rerun()
         elif not ok_msg:
             st.error(err_msg or "Could not load message.")
@@ -676,6 +787,7 @@ with tab_records:
                 "id": p["id"],
                 "name": (p.get("name") or "").strip() or "—",
                 "email": p["email"],
+                "required_docs": _format_required_docs_cell(p.get("required_document_types")),
                 "stored_docs": int(p.get("document_count") or 0),
                 "added_at": _format_added_at(p["created_at"]),
             }
@@ -690,6 +802,7 @@ with tab_records:
                 "id": st.column_config.NumberColumn("ID", width="small"),
                 "name": st.column_config.TextColumn("Provider name"),
                 "email": st.column_config.TextColumn("Email"),
+                "required_docs": st.column_config.TextColumn("Required docs", width="medium"),
                 "stored_docs": st.column_config.NumberColumn("Stored docs", width="small"),
                 "added_at": st.column_config.TextColumn("Added (UTC)"),
             },
