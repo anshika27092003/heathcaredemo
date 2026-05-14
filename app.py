@@ -281,6 +281,63 @@ def _format_added_at(iso_ts: str) -> str:
         return iso_ts
 
 
+def _human_required_doc_label(key: str) -> str:
+    k = (key or "").strip().lower()
+    if k == "license":
+        return "License / ID"
+    if k == "cv":
+        return "CV / résumé"
+    return str(key)
+
+
+def _follow_up_short_label(status: str) -> str:
+    s = (status or "").strip().lower()
+    if s == "sent_now":
+        return "Sent this time"
+    if s == "already_sent":
+        return "Sent earlier"
+    if s == "not_sent":
+        return "Not sent"
+    return status
+
+
+def _format_latest_incomplete_cell(latest: object) -> str:
+    """One-line summary for the All providers table."""
+    if not isinstance(latest, dict):
+        return "—"
+    try:
+        missing = json.loads(str(latest.get("missing_types_json") or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        missing = []
+    if not isinstance(missing, list) or not missing:
+        return "—"
+    miss_labels = [_human_required_doc_label(str(x)) for x in missing]
+    ts = _format_added_at(str(latest.get("logged_at") or ""))
+    return f"Missing: {', '.join(miss_labels)} · {ts}"
+
+
+def _incomplete_event_to_row(r: dict) -> dict:
+    """Flatten an incomplete_submission_events row for ``st.dataframe``."""
+    try:
+        missing = json.loads(str(r.get("missing_types_json") or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        missing = []
+    try:
+        present = json.loads(str(r.get("present_types_json") or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        present = []
+    miss_str = ", ".join(_human_required_doc_label(str(x)) for x in missing) or "—"
+    pres_str = ", ".join(_human_required_doc_label(str(x)) for x in present) if present else "—"
+    return {
+        "Logged": _format_added_at(str(r.get("logged_at") or "")),
+        "Message ref": str(r.get("imap_uid") or ""),
+        "Email subject": (str(r.get("source_subject") or "")[:100] or "—"),
+        "Missing": miss_str,
+        "Found in email": pres_str,
+        "Follow-up email": _follow_up_short_label(str(r.get("follow_up_status") or "")),
+    }
+
+
 def _ensure_database_api_polyfills() -> None:
     """
     Attach APIs that older ``database.py`` forks omit (partial deploys / stale Cloud repo).
@@ -806,12 +863,16 @@ with tab_proc:
                                     "Every document type you marked as required for this provider is present in this email."
                                 )
                             elif missing:
+                                recv_sorted = sorted(required_set & present)
+                                miss_sorted = sorted(missing)
+                                follow_up = "not_sent"
                                 if not callable(reminder_sent_fn) or not callable(record_rem_fn):
                                     extra_notes.append(
                                         "Some required document types are still missing. "
                                         "Automatic reminders are not available until this app is updated—ask your technical contact."
                                     )
                                 elif reminder_sent_fn(pid, str(open_uid)):
+                                    follow_up = "already_sent"
                                     extra_notes.append(
                                         "Some required document types are still missing. "
                                         "A reminder was already sent for this email."
@@ -829,8 +890,6 @@ with tab_proc:
                                     pname = (
                                         (prov_row or {}).get("name") or ""
                                     ).strip() or "Provider"
-                                    recv_sorted = sorted(required_set & present)
-                                    miss_sorted = sorted(missing)
                                     mail_fn = send_missing_submission_documents_email
                                     if mail_fn is None:
                                         extra_notes.append(
@@ -850,11 +909,23 @@ with tab_proc:
                                         )
                                         if ok_rem:
                                             record_rem_fn(pid, str(open_uid))
+                                            follow_up = "sent_now"
                                             extra_notes.append(msg_rem)
                                         else:
                                             extra_notes.append(
                                                 "Could not send the reminder email: " + msg_rem
                                             )
+
+                                log_fn = getattr(db, "log_incomplete_submission_event", None)
+                                if callable(log_fn):
+                                    log_fn(
+                                        pid,
+                                        str(open_uid),
+                                        miss_sorted,
+                                        recv_sorted,
+                                        follow_up,
+                                        str(detail.get("subject") or ""),
+                                    )
 
                         parts = ["Finished reading attachments. " + " | ".join(lines)]
                         parts.extend(extra_notes)
@@ -875,6 +946,13 @@ with tab_records:
     if not providers:
         st.info("Add a provider first to see their records here.")
     else:
+        inc_map: dict = {}
+        lim_fn = getattr(db, "latest_incomplete_submission_map", None)
+        if callable(lim_fn):
+            try:
+                inc_map = lim_fn()
+            except (TypeError, sqlite3.OperationalError, ValueError):
+                inc_map = {}
         roster_rows = [
             {
                 "id": p["id"],
@@ -883,6 +961,9 @@ with tab_records:
                 "required_docs": _format_required_docs_cell(p.get("required_document_types")),
                 "required_fields": _format_required_fields_cell(p),
                 "stored_docs": int(p.get("document_count") or 0),
+                "last_incomplete": _format_latest_incomplete_cell(
+                    inc_map.get(int(p["id"]))
+                ),
                 "added_at": _format_added_at(p["created_at"]),
             }
             for p in providers
@@ -899,6 +980,9 @@ with tab_records:
                 "required_docs": st.column_config.TextColumn("Required docs", width="medium"),
                 "required_fields": st.column_config.TextColumn("Required fields", width="medium"),
                 "stored_docs": st.column_config.NumberColumn("Stored docs", width="small"),
+                "last_incomplete": st.column_config.TextColumn(
+                    "Last incomplete submission", width="large"
+                ),
                 "added_at": st.column_config.TextColumn("Added (UTC)"),
             },
         )
@@ -915,6 +999,29 @@ with tab_records:
             key="doc_provider_pick",
         )
         docs = db.list_documents_for_provider(doc_pid)
+
+        gap_fn = getattr(db, "list_incomplete_submission_events", None)
+        gap_rows: list = gap_fn(doc_pid, 50) if callable(gap_fn) else []
+        if gap_rows:
+            st.markdown("**Incomplete email submissions**")
+            st.caption(
+                "Logged whenever **Read documents** finds a required document type still missing for that email. "
+                "This matches the green summary message you see after reading attachments."
+            )
+            st.dataframe(
+                [_incomplete_event_to_row(r) for r in gap_rows],
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Logged": st.column_config.TextColumn("Logged", width="small"),
+                    "Message ref": st.column_config.TextColumn("Ref", width="small"),
+                    "Email subject": st.column_config.TextColumn("Subject", width="medium"),
+                    "Missing": st.column_config.TextColumn("Missing", width="medium"),
+                    "Found in email": st.column_config.TextColumn("Found", width="medium"),
+                    "Follow-up email": st.column_config.TextColumn("Follow-up", width="small"),
+                },
+            )
+            st.divider()
 
         with st.expander("Clear saved files & inbox view", expanded=False):
             st.caption(

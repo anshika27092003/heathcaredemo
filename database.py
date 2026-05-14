@@ -89,6 +89,29 @@ def _migrate_missing_submission_reminders(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_incomplete_submission_events(conn: sqlite3.Connection) -> None:
+    """Log each time required document types were missing after reading an email (for admin review)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS incomplete_submission_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER NOT NULL,
+            imap_uid TEXT NOT NULL,
+            missing_types_json TEXT NOT NULL,
+            present_types_json TEXT NOT NULL,
+            follow_up_status TEXT NOT NULL DEFAULT 'not_sent',
+            source_subject TEXT NOT NULL DEFAULT '',
+            logged_at TEXT NOT NULL,
+            FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_incomplete_sub_provider "
+        "ON incomplete_submission_events(provider_id)"
+    )
+
+
 def _migrate_providers_credentialing_field_rules(conn: sqlite3.Connection) -> None:
     """JSON object: which structured fields count as required per document type (license / cv)."""
     cur = conn.execute("PRAGMA table_info(providers)")
@@ -116,6 +139,7 @@ def init_db() -> None:
         _migrate_providers_table(conn)
         _migrate_providers_required_documents(conn)
         _migrate_missing_submission_reminders(conn)
+        _migrate_incomplete_submission_events(conn)
         _migrate_providers_credentialing_field_rules(conn)
         conn.execute(
             """
@@ -409,6 +433,96 @@ def record_missing_submission_reminder_sent(provider_id: int, imap_uid: str) -> 
             (int(provider_id), str(imap_uid), sent_at),
         )
         conn.commit()
+
+
+def log_incomplete_submission_event(
+    provider_id: int,
+    imap_uid: str,
+    missing_types: list[str],
+    present_types: list[str],
+    follow_up_status: str,
+    source_subject: str = "",
+) -> None:
+    """
+    Append a row whenever required document types were still missing after reading attachments.
+
+    ``follow_up_status`` is one of: ``sent_now``, ``already_sent``, ``not_sent``.
+    """
+    pid = int(provider_id)
+    uid = str(imap_uid)
+    miss = normalize_required_document_types(list(missing_types or []))
+    pres = normalize_required_document_types(list(present_types or []))
+    if not miss:
+        return
+    status = (follow_up_status or "not_sent").strip().lower()
+    if status not in ("sent_now", "already_sent", "not_sent"):
+        status = "not_sent"
+    logged_at = datetime.now(timezone.utc).isoformat()
+    with _get_connection() as conn:
+        _migrate_incomplete_submission_events(conn)
+        conn.execute(
+            """
+            INSERT INTO incomplete_submission_events (
+                provider_id, imap_uid, missing_types_json, present_types_json,
+                follow_up_status, source_subject, logged_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pid,
+                uid,
+                json.dumps(miss),
+                json.dumps(pres),
+                status,
+                str(source_subject or "")[:500],
+                logged_at,
+            ),
+        )
+        conn.commit()
+
+
+def latest_incomplete_submission_map() -> dict[int, dict[str, Any]]:
+    """Latest incomplete-submission row per provider (by highest row id)."""
+    with _get_connection() as conn:
+        _migrate_incomplete_submission_events(conn)
+        cur = conn.execute(
+            """
+            SELECT e.id, e.provider_id, e.imap_uid, e.missing_types_json, e.present_types_json,
+                   e.follow_up_status, e.source_subject, e.logged_at
+            FROM incomplete_submission_events e
+            WHERE e.id IN (
+                SELECT MAX(id) FROM incomplete_submission_events GROUP BY provider_id
+            )
+            """
+        )
+        rows = cur.fetchall()
+    return {int(r["provider_id"]): dict(r) for r in rows}
+
+
+def list_incomplete_submission_events(
+    provider_id: int,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Newest incomplete checks for one provider."""
+    try:
+        pid = int(provider_id)
+    except (TypeError, ValueError):
+        return []
+    lim = max(1, min(int(limit), 200))
+    with _get_connection() as conn:
+        _migrate_incomplete_submission_events(conn)
+        cur = conn.execute(
+            """
+            SELECT id, imap_uid, missing_types_json, present_types_json,
+                   follow_up_status, source_subject, logged_at
+            FROM incomplete_submission_events
+            WHERE provider_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (pid, lim),
+        )
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 def provider_email_set() -> set[str]:
