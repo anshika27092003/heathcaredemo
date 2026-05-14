@@ -108,7 +108,13 @@ except ImportError:
     send_missing_submission_documents_email = None  # type: ignore[misc, assignment]
 
 
-def _missing_credentialing_labels_shim(category: str, sf: dict) -> list[str]:
+def _missing_credentialing_labels_shim(
+    category: str,
+    sf: dict,
+    *,
+    only_keys: frozenset | set | None = None,
+    **kwargs: object,
+) -> list[str]:
     """
     Same rules as ``document_categorization.missing_credentialing_labels`` when that
     symbol is missing on a partial deploy (old ``document_categorization.py``).
@@ -119,6 +125,11 @@ def _missing_credentialing_labels_shim(category: str, sf: dict) -> list[str]:
         c = "other"
     missing: list[str] = []
 
+    def want(rule_key: str) -> bool:
+        if only_keys is None or len(only_keys) == 0:
+            return True
+        return rule_key in only_keys
+
     def blank(key: str) -> bool:
         v = sf.get(key)
         return v is None or str(v).strip() == ""
@@ -128,19 +139,30 @@ def _missing_credentialing_labels_shim(category: str, sf: dict) -> list[str]:
             missing.append(label)
 
     if c == "license":
-        add("Full name", blank("name"))
-        add("License number", blank("license_number"))
-        exp_ok = not blank("expiry_date") or not blank("expiration_date")
-        add("Expiration date", not exp_ok)
-        iss_ok = not blank("issue_date") or not blank("initial_license_date")
-        add("Issue / initial license date", not iss_ok)
-        sig = str(sf.get("signature_present") or "").strip().lower()
-        add("Signature status (not confirmed as yes/no)", sig not in ("yes", "no"))
+        if want("name"):
+            add("Full name", blank("name"))
+        if want("license_number"):
+            add("License number", blank("license_number"))
+        if want("expiration"):
+            exp_ok = not blank("expiry_date") or not blank("expiration_date")
+            add("Expiration date", not exp_ok)
+        if want("issue_date"):
+            iss_ok = not blank("issue_date") or not blank("initial_license_date")
+            add("Issue / initial license date", not iss_ok)
+        if want("signature"):
+            sig = str(sf.get("signature_present") or "").strip().lower()
+            add("Signature status (not confirmed as yes/no)", sig not in ("yes", "no"))
     elif c == "cv":
-        add("Name", blank("name"))
-        add("Email", blank("email"))
-        add("Phone", blank("phone"))
-        add("Location / address", blank("location"))
+        if want("name"):
+            add("Name", blank("name"))
+        if want("email"):
+            add("Email", blank("email"))
+        if want("phone"):
+            add("Phone", blank("phone"))
+        if want("location"):
+            add("Location / address", blank("location"))
+        if want("description"):
+            add("Description / CV summary", blank("description"))
     else:
         add("Name", blank("name"))
         add("Email", blank("email"))
@@ -159,6 +181,26 @@ except ImportError:
 missing_credentialing_labels = (
     _missing_from_mod if _missing_from_mod is not None else _missing_credentialing_labels_shim
 )
+
+
+def _missing_labels_respecting_provider(dc: str, sf: dict, prov_row: dict) -> list[str]:
+    """Apply ``missing_credentialing_labels`` limited to this provider's onboarding field rules."""
+    rcf = prov_row.get("required_credentialing_fields")
+    if not isinstance(rcf, dict):
+        rcf = {}
+    only: frozenset[str] | None = None
+    if dc == "license":
+        lk = rcf.get("license")
+        if isinstance(lk, list) and lk:
+            only = frozenset(str(x) for x in lk)
+    elif dc == "cv":
+        ck = rcf.get("cv")
+        if isinstance(ck, list) and ck:
+            only = frozenset(str(x) for x in ck)
+    try:
+        return missing_credentialing_labels(dc, sf, only_keys=only)
+    except TypeError:
+        return missing_credentialing_labels(dc, sf)
 
 # mail_reader / ocr_service are imported lazily where used so the first paint does not
 # load IMAP + Google Document AI stacks until you open inbox / run OCR.
@@ -207,6 +249,25 @@ def _format_required_docs_cell(req: object) -> str:
         else:
             bits.append(str(x))
     return ", ".join(bits)
+
+
+def _format_required_fields_cell(row: dict) -> str:
+    """Summarize per-provider OCR field rules from onboarding."""
+    rcf = row.get("required_credentialing_fields")
+    dts = row.get("required_document_types")
+    if not isinstance(rcf, dict) or not rcf:
+        return "All fields"
+    parts: list[str] = []
+    if isinstance(dts, list):
+        for dt in dts:
+            if dt not in rcf:
+                continue
+            keys = rcf[dt]
+            abbrev = "Lic." if dt == "license" else "CV"
+            if isinstance(keys, list) and keys:
+                n = len(keys)
+                parts.append(f"{abbrev} ({n} field{'s' if n != 1 else ''})")
+    return ", ".join(parts) if parts else "All fields"
 
 
 def _format_added_at(iso_ts: str) -> str:
@@ -341,6 +402,11 @@ tab_onboard, tab_mail, tab_proc, tab_records = st.tabs(
 
 # --- Tab 1: Admin onboarding — provider name + email ---
 with tab_onboard:
+    from document_categorization import (
+        CREDENTIALING_FIELD_OPTIONS_CV,
+        CREDENTIALING_FIELD_OPTIONS_LICENSE,
+    )
+
     st.subheader("Onboard providers")
     st.caption("Only messages **From** these addresses appear in **Email & inbox**.")
     col_form, _ = st.columns([2, 1])
@@ -371,10 +437,45 @@ with tab_onboard:
                     "the provider to send the missing file(s) together with what they already attached."
                 ),
             )
+            license_field_pick: list[str] = []
+            cv_field_pick: list[str] = []
+            if "license" in required_doc_pick:
+                license_field_pick = st.multiselect(
+                    "License / professional ID — required OCR / structured fields",
+                    options=[k for k, _ in CREDENTIALING_FIELD_OPTIONS_LICENSE],
+                    default=[k for k, _ in CREDENTIALING_FIELD_OPTIONS_LICENSE],
+                    format_func=lambda k: next(
+                        lab for kk, lab in CREDENTIALING_FIELD_OPTIONS_LICENSE if kk == k
+                    ),
+                    help=(
+                        "When a file is classified as a license, **Provider records** missing-field "
+                        "checks and emails only consider these fields."
+                    ),
+                    key="onboard_license_fields",
+                )
+            if "cv" in required_doc_pick:
+                cv_field_pick = st.multiselect(
+                    "CV / résumé — required OCR / structured fields",
+                    options=[k for k, _ in CREDENTIALING_FIELD_OPTIONS_CV],
+                    default=[k for k, _ in CREDENTIALING_FIELD_OPTIONS_CV],
+                    format_func=lambda k: next(
+                        lab for kk, lab in CREDENTIALING_FIELD_OPTIONS_CV if kk == k
+                    ),
+                    help=(
+                        "When a file is classified as a CV, **Provider records** missing-field "
+                        "checks and emails only consider these fields."
+                    ),
+                    key="onboard_cv_fields",
+                )
             submitted = st.form_submit_button("Save provider", type="primary")
 
     if submitted:
-        ok, msg = db.add_provider(provider_name, new_email, required_doc_pick)
+        rcf_payload: dict[str, list[str]] = {}
+        if "license" in required_doc_pick:
+            rcf_payload["license"] = list(license_field_pick)
+        if "cv" in required_doc_pick:
+            rcf_payload["cv"] = list(cv_field_pick)
+        ok, msg = db.add_provider(provider_name, new_email, required_doc_pick, rcf_payload)
         if ok:
             st.session_state["flash_success"] = msg
         else:
@@ -390,6 +491,7 @@ with tab_onboard:
                 "name": (row.get("name") or "").strip() or "—",
                 "email": row["email"],
                 "required_docs": _format_required_docs_cell(row.get("required_document_types")),
+                "required_fields": _format_required_fields_cell(row),
                 "documents": int(row.get("document_count") or 0),
                 "added_at": _format_added_at(row["created_at"]),
             }
@@ -404,6 +506,7 @@ with tab_onboard:
                 "name": st.column_config.TextColumn("Provider name"),
                 "email": st.column_config.TextColumn("Email"),
                 "required_docs": st.column_config.TextColumn("Required docs", width="medium"),
+                "required_fields": st.column_config.TextColumn("Required fields", width="medium"),
                 "documents": st.column_config.NumberColumn("Stored docs", width="small"),
                 "added_at": st.column_config.TextColumn("Added (UTC)"),
             },
@@ -788,6 +891,7 @@ with tab_records:
                 "name": (p.get("name") or "").strip() or "—",
                 "email": p["email"],
                 "required_docs": _format_required_docs_cell(p.get("required_document_types")),
+                "required_fields": _format_required_fields_cell(p),
                 "stored_docs": int(p.get("document_count") or 0),
                 "added_at": _format_added_at(p["created_at"]),
             }
@@ -803,6 +907,7 @@ with tab_records:
                 "name": st.column_config.TextColumn("Provider name"),
                 "email": st.column_config.TextColumn("Email"),
                 "required_docs": st.column_config.TextColumn("Required docs", width="medium"),
+                "required_fields": st.column_config.TextColumn("Required fields", width="medium"),
                 "stored_docs": st.column_config.NumberColumn("Stored docs", width="small"),
                 "added_at": st.column_config.TextColumn("Added (UTC)"),
             },
@@ -1240,14 +1345,14 @@ with tab_records:
                     prov_email = str(prov_row.get("email") or "").strip()
                     prov_name = (prov_row.get("name") or "").strip() or "Provider"
                     st.caption(
-                        "Uses the **same required-field rules** as the **tables above**. "
-                        "The message is sent to this provider’s **onboarded email** (from Provider onboarding), "
-                        "not the address read from a résumé."
+                        "Uses the rules from **Provider onboarding** (which structured fields must be "
+                        "present for license vs CV). The message is sent to this provider’s **onboarded email** "
+                        "(from Provider onboarding), not the address read from a résumé."
                     )
                     gap_list: list[tuple[str, list[str]]] = []
                     for d in docs:
                         dc, sf = _display_category_and_fields(d)
-                        labels = missing_credentialing_labels(dc, sf)
+                        labels = _missing_labels_respecting_provider(dc, sf, id_to_row[doc_pid])
                         if labels:
                             gap_list.append((str(d.get("filename") or "document"), labels))
                     if not gap_list:

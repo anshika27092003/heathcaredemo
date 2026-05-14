@@ -8,6 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from document_categorization import (
+    ALLOWED_CREDENTIALING_RULE_KEYS,
+    CREDENTIALING_FIELD_OPTIONS_CV,
+    CREDENTIALING_FIELD_OPTIONS_LICENSE,
+)
+
 # Document types the admin can mark as required at onboarding (matches ``document_categorization``).
 ALLOWED_REQUIRED_DOC_TYPES = frozenset({"license", "cv"})
 
@@ -83,6 +89,17 @@ def _migrate_missing_submission_reminders(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_providers_credentialing_field_rules(conn: sqlite3.Connection) -> None:
+    """JSON object: which structured fields count as required per document type (license / cv)."""
+    cur = conn.execute("PRAGMA table_info(providers)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "required_credentialing_fields_json" not in columns:
+        conn.execute(
+            "ALTER TABLE providers ADD COLUMN required_credentialing_fields_json "
+            "TEXT NOT NULL DEFAULT '{}'"
+        )
+
+
 def init_db() -> None:
     """Create tables if they do not exist; apply lightweight migrations."""
     with _get_connection() as conn:
@@ -99,6 +116,7 @@ def init_db() -> None:
         _migrate_providers_table(conn)
         _migrate_providers_required_documents(conn)
         _migrate_missing_submission_reminders(conn)
+        _migrate_providers_credentialing_field_rules(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS provider_documents (
@@ -151,16 +169,70 @@ def normalize_required_document_types(raw: list[str] | tuple[str, ...] | None) -
     return out
 
 
+def _ordered_rule_keys_for_category(category: str, picks: list[str]) -> list[str]:
+    allowed = ALLOWED_CREDENTIALING_RULE_KEYS.get(category, frozenset())
+    opts = (
+        CREDENTIALING_FIELD_OPTIONS_LICENSE
+        if category == "license"
+        else CREDENTIALING_FIELD_OPTIONS_CV
+    )
+    pick_set = {str(p).strip() for p in picks}
+    return [k for k, _ in opts if k in allowed and k in pick_set]
+
+
+def normalize_required_credentialing_fields(
+    doc_types: list[str],
+    raw: dict[str, Any] | None,
+) -> tuple[dict[str, list[str]] | None, str]:
+    """
+    Build ``{"license": [...], "cv": [...]}`` for each required document type.
+
+    ``raw`` comes from onboarding (keys ``license`` / ``cv``). Unknown keys are ignored.
+    When a category is absent from ``raw`` or has a non-list value, **all** fields for that
+    category are required (same as legacy behavior). Empty list after sanitizing is an error.
+    """
+    out: dict[str, list[str]] = {}
+    for dt in doc_types:
+        if dt not in ALLOWED_CREDENTIALING_RULE_KEYS:
+            continue
+        allowed = ALLOWED_CREDENTIALING_RULE_KEYS[dt]
+        opts = (
+            CREDENTIALING_FIELD_OPTIONS_LICENSE
+            if dt == "license"
+            else CREDENTIALING_FIELD_OPTIONS_CV
+        )
+        default_keys = [k for k, _ in opts if k in allowed]
+        picks_list: list[str] | None = None
+        if isinstance(raw, dict) and isinstance(raw.get(dt), list):
+            picks_list = [str(x).strip() for x in raw[dt]]
+        if picks_list is None:
+            out[dt] = list(default_keys)
+            continue
+        cleaned = _ordered_rule_keys_for_category(dt, picks_list)
+        if not cleaned:
+            label = "License / professional ID" if dt == "license" else "CV / résumé"
+            return None, (
+                f"Select at least one OCR field to require for **{label}**, or remove that document type."
+            )
+        out[dt] = cleaned
+    return out, ""
+
+
 def add_provider(
     name: str,
     email: str,
     required_document_types: list[str] | tuple[str, ...] | None = None,
+    required_credentialing_fields: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """
     Onboard a provider with display name and email. Returns (success, message).
     Prevents duplicate emails via UNIQUE constraint.
 
     ``required_document_types`` must list at least one of: ``license``, ``cv``.
+
+    ``required_credentialing_fields`` maps each selected type to a list of rule keys
+    (see ``document_categorization.ALLOWED_CREDENTIALING_RULE_KEYS``). Omitted categories
+    default to **all** fields for that type.
     """
     name = (name or "").strip()
     if not name:
@@ -181,16 +253,22 @@ def add_provider(
             "Select at least one required document type (License / ID and/or CV / résumé).",
         )
 
+    fld_map, fld_err = normalize_required_credentialing_fields(req, required_credentialing_fields)
+    if fld_map is None:
+        return False, fld_err
+
     created_at = datetime.now(timezone.utc).isoformat()
     req_json = json.dumps(req)
+    fields_json = json.dumps(fld_map)
 
     try:
         with _get_connection() as conn:
             _migrate_providers_required_documents(conn)
+            _migrate_providers_credentialing_field_rules(conn)
             conn.execute(
-                "INSERT INTO providers (name, email, created_at, required_document_types) "
-                "VALUES (?, ?, ?, ?)",
-                (name, email, created_at, req_json),
+                "INSERT INTO providers (name, email, created_at, required_document_types, "
+                "required_credentialing_fields_json) VALUES (?, ?, ?, ?, ?)",
+                (name, email, created_at, req_json, fields_json),
             )
             conn.commit()
     except sqlite3.IntegrityError:
@@ -203,9 +281,11 @@ def list_providers() -> list[dict[str, Any]]:
     """Return all providers (newest first) with a count of stored processed documents."""
     with _get_connection() as conn:
         _migrate_providers_required_documents(conn)
+        _migrate_providers_credentialing_field_rules(conn)
         cur = conn.execute(
             """
             SELECT p.id, p.name, p.email, p.created_at, p.required_document_types,
+                   p.required_credentialing_fields_json,
                    (SELECT COUNT(*) FROM provider_documents d WHERE d.provider_id = p.id)
                    AS document_count
             FROM providers p
@@ -218,6 +298,31 @@ def list_providers() -> list[dict[str, Any]]:
         r["required_document_types"] = parse_required_document_types_column(
             r.get("required_document_types")
         )
+        raw_fields = r.pop("required_credentialing_fields_json", None)
+        r["required_credentialing_fields"] = parse_required_credentialing_fields_column(raw_fields)
+    return out
+
+
+def parse_required_credentialing_fields_column(value: object) -> dict[str, list[str]]:
+    """Parse JSON object from DB into ``{ "license": [...], "cv": [...] }``."""
+    if value is None:
+        return {}
+    s = str(value).strip()
+    if not s or s == "{}":
+        return {}
+    try:
+        data = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for k, v in data.items():
+        kk = str(k).strip().lower()
+        if kk not in ("license", "cv"):
+            continue
+        if isinstance(v, list):
+            out[kk] = [str(x).strip() for x in v if str(x).strip()]
     return out
 
 

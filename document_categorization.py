@@ -634,9 +634,43 @@ def _sf_blank(sf: dict[str, Any], key: str) -> bool:
     return v is None or str(v).strip() == ""
 
 
-def missing_credentialing_labels(category: str, sf: dict[str, Any]) -> list[str]:
+# Keys admins can toggle per provider (onboarding). Maps to checks in ``missing_credentialing_labels``.
+ALLOWED_CREDENTIALING_RULE_KEYS: dict[str, frozenset[str]] = {
+    "license": frozenset(
+        {"name", "license_number", "expiration", "issue_date", "signature"}
+    ),
+    "cv": frozenset({"name", "email", "phone", "location", "description"}),
+}
+
+# UI order + labels for Streamlit (value is rule key).
+CREDENTIALING_FIELD_OPTIONS_LICENSE: tuple[tuple[str, str], ...] = (
+    ("name", "Full name"),
+    ("license_number", "License number"),
+    ("expiration", "Expiration date"),
+    ("issue_date", "Issue / initial license date"),
+    ("signature", "Signature present (yes / no)"),
+)
+CREDENTIALING_FIELD_OPTIONS_CV: tuple[tuple[str, str], ...] = (
+    ("name", "Name"),
+    ("email", "Email"),
+    ("phone", "Phone"),
+    ("location", "Location / address"),
+    ("description", "Description / CV summary"),
+)
+
+
+def missing_credentialing_labels(
+    category: str,
+    sf: dict[str, Any],
+    *,
+    only_keys: frozenset[str] | set[str] | None = None,
+) -> list[str]:
     """
     Human-readable labels for important fields that are empty or unclear (admin / provider follow-up).
+
+    ``only_keys`` limits checks to a provider-specific subset (rule keys from
+    ``ALLOWED_CREDENTIALING_RULE_KEYS``). ``None`` or empty means **all** checks
+    for that category (legacy behavior).
     """
     sf = sf or {}
     c = (category or "other").strip().lower()
@@ -644,24 +678,40 @@ def missing_credentialing_labels(category: str, sf: dict[str, Any]) -> list[str]
         c = "other"
     missing: list[str] = []
 
+    def want(rule_key: str) -> bool:
+        if only_keys is None or len(only_keys) == 0:
+            return True
+        return rule_key in only_keys
+
     def add(label: str, condition: bool) -> None:
         if condition:
             missing.append(label)
 
     if c == "license":
-        add("Full name", _sf_blank(sf, "name"))
-        add("License number", _sf_blank(sf, "license_number"))
-        exp_ok = not _sf_blank(sf, "expiry_date") or not _sf_blank(sf, "expiration_date")
-        add("Expiration date", not exp_ok)
-        iss_ok = not _sf_blank(sf, "issue_date") or not _sf_blank(sf, "initial_license_date")
-        add("Issue / initial license date", not iss_ok)
-        sig = str(sf.get("signature_present") or "").strip().lower()
-        add("Signature status (not confirmed as yes/no)", sig not in ("yes", "no"))
+        if want("name"):
+            add("Full name", _sf_blank(sf, "name"))
+        if want("license_number"):
+            add("License number", _sf_blank(sf, "license_number"))
+        if want("expiration"):
+            exp_ok = not _sf_blank(sf, "expiry_date") or not _sf_blank(sf, "expiration_date")
+            add("Expiration date", not exp_ok)
+        if want("issue_date"):
+            iss_ok = not _sf_blank(sf, "issue_date") or not _sf_blank(sf, "initial_license_date")
+            add("Issue / initial license date", not iss_ok)
+        if want("signature"):
+            sig = str(sf.get("signature_present") or "").strip().lower()
+            add("Signature status (not confirmed as yes/no)", sig not in ("yes", "no"))
     elif c == "cv":
-        add("Name", _sf_blank(sf, "name"))
-        add("Email", _sf_blank(sf, "email"))
-        add("Phone", _sf_blank(sf, "phone"))
-        add("Location / address", _sf_blank(sf, "location"))
+        if want("name"):
+            add("Name", _sf_blank(sf, "name"))
+        if want("email"):
+            add("Email", _sf_blank(sf, "email"))
+        if want("phone"):
+            add("Phone", _sf_blank(sf, "phone"))
+        if want("location"):
+            add("Location / address", _sf_blank(sf, "location"))
+        if want("description"):
+            add("Description / CV summary", _sf_blank(sf, "description"))
     else:
         add("Name", _sf_blank(sf, "name"))
         add("Email", _sf_blank(sf, "email"))
